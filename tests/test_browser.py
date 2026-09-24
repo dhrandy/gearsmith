@@ -236,3 +236,63 @@ def test_long_text_truncates_or_wraps_inside_cards(app_url, width, height):
             assert_no_overflow(page, route)
 
         browser.close()
+
+
+def section_names(page, heading):
+    grid = page.locator("h2.section-title", has_text=heading).locator("xpath=following-sibling::div[1]")
+    return grid.locator(".gc-name").all_inner_texts()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_star_toggle_floats_to_top_and_favorites_filter(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.on("dialog", lambda d: d.accept())
+        sign_in(page, app_url)
+        assert section_names(page, "Guitars") == ["Heron", "Starling"]
+
+        # one tap on the card star, no page reload: Starling moves to the top of Guitars
+        page.evaluate("window.__noReload = true")
+        star = page.get_by_role("button", name="Add Starling to favorites")
+        expect(star).to_have_attribute("aria-pressed", "false")
+        star.click()
+        filled = page.get_by_role("button", name="Remove Starling from favorites")
+        expect(filled).to_have_attribute("aria-pressed", "true")
+        expect(filled).to_have_text("★")
+        assert section_names(page, "Guitars") == ["Starling", "Heron"]
+        assert page.evaluate("window.__noReload") is True
+        box = page.locator(".gear-cell", has_text="Starling")
+        assert_no_overflow(page, "gear list with a star")
+        # the star sits inside its card and doesn't cover the name
+        cb, sb, nb = (box.locator(s).bounding_box() for s in (".gear-card", ".star", ".gc-name"))
+        assert sb["x"] + sb["width"] <= cb["x"] + cb["width"] + 1 and nb["x"] + nb["width"] <= sb["x"] + 1
+
+        # it sticks after a reload
+        page.reload()
+        expect(page.get_by_role("button", name="Remove Starling from favorites")).to_be_visible()
+        assert section_names(page, "Guitars") == ["Starling", "Heron"]
+
+        # favorites only: just the starred gear, remembered across visits
+        page.get_by_role("button", name="Favorites only").click()
+        expect(page.get_by_role("button", name="Favorites only")).to_have_attribute("aria-pressed", "true")
+        expect(page.locator(".gear-card")).to_have_count(1)
+        expect(page.get_by_role("heading", name=re.compile("Amps"))).to_have_count(0)
+        page.reload()
+        expect(page.locator(".gear-card")).to_have_count(1)
+
+        # detail page toggle: unstar there, the filtered list comes up empty
+        page.get_by_role("link", name=re.compile("Starling")).click()
+        detail = page.locator("#gd-fav-wrap button")
+        expect(detail).to_have_attribute("aria-pressed", "true")
+        page.evaluate("window.__noReload = true")
+        detail.click()
+        expect(page.locator("#gd-fav-wrap button")).to_have_attribute("aria-pressed", "false")
+        expect(page.locator("#gd-fav-wrap button")).to_contain_text("☆")
+        assert page.evaluate("window.__noReload") is True
+        page.get_by_role("link", name="Gear", exact=True).first.click()
+        expect(page.get_by_text("No favorites yet")).to_be_visible()
+        page.get_by_role("button", name="Favorites only").click()
+        expect(page.get_by_role("button", name="Add Starling to favorites")).to_be_visible()
+        assert section_names(page, "Guitars") == ["Heron", "Starling"]
+        browser.close()

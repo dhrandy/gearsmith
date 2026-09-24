@@ -85,8 +85,11 @@ The interactive docs are at /api/docs and the OpenAPI spec at /api/v1/openapi.js
 You can: list and add gear (GET/POST /api/v1/gear), read one item (GET /api/v1/gear/{id}),
 update it (PATCH /api/v1/gear/{id}), log a restring (POST /api/v1/gear/{id}/restrings with
 brand, gauge and optional date), check what's due (GET /api/v1/due), and manage sets
-(GET/POST /api/v1/sets). When I tell you I restrung a guitar, log it. When I ask what
-needs new strings, check the due list.
+(GET/POST /api/v1/sets). Photos: attach one (POST /api/v1/gear/{id}/photos, multipart
+field "photo"), delete one (DELETE /api/v1/photos/{photo_id}), or make one the cover
+(POST /api/v1/photos/{photo_id}/cover); photo ids are in the item's photos list.
+When I tell you I restrung a guitar, log it. When I ask what needs new strings, check the
+due list.
 ```
 
 Treat tokens like passwords - anyone holding one can read and change your gear.

@@ -304,3 +304,62 @@ def test_notifications_settings(tmp_path):
             # marking it announced silences it until the repeat window passes
             main.mark_announced(conn, "notify_state", items, datetime.now().astimezone())
             assert main.notification_items(conn, datetime.now().astimezone()) == []
+
+
+def test_token_api_photo_delete_and_cover(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        h = {"Authorization": f"Bearer {c.post('/api/tokens', json={'name': 'bot'}).json()['token']}"}
+        ids = seed_ids(c)
+        amp, drive = ids["Club 20"]["id"], ids["Demo Drive"]["id"]
+        first = c.post(f"/api/v1/gear/{amp}/photos", headers=h, files={"photo": ("a.png", PNG, "image/png")}).json()
+        second = c.post(f"/api/v1/gear/{amp}/photos", headers=h, files={"photo": ("b.png", PNG, "image/png")}).json()
+        other = c.post(f"/api/v1/gear/{drive}/photos", headers=h, files={"photo": ("c.png", PNG, "image/png")}).json()
+        assert c.get(f"/api/v1/gear/{amp}", headers=h).json()["cover"] == first["url"]
+
+        # both routes are in the published spec
+        paths = c.get("/api/v1/openapi.json").json()["paths"]
+        assert "delete" in paths["/api/v1/photos/{photo_id}"]
+        assert "post" in paths["/api/v1/photos/{photo_id}/cover"]
+
+        # auth: no token, a bad token, and a session cookie alone are all refused
+        with TestClient(main.app) as anon:
+            assert anon.delete(f"/api/v1/photos/{first['id']}").status_code == 401
+            assert anon.post(f"/api/v1/photos/{first['id']}/cover").status_code == 401
+            bad = {"Authorization": "Bearer gs_nope"}
+            assert anon.delete(f"/api/v1/photos/{first['id']}", headers=bad).status_code == 401
+            assert anon.post(f"/api/v1/photos/{first['id']}/cover", headers=bad).status_code == 401
+        assert c.delete(f"/api/v1/photos/{first['id']}").status_code == 401
+
+        # cover: the chosen photo becomes the cover, other gear is untouched
+        assert c.post(f"/api/v1/photos/{second['id']}/cover", headers=h).json() == {"ok": True}
+        g = c.get(f"/api/v1/gear/{amp}", headers=h).json()
+        assert g["cover"] == second["url"]
+        assert [p["id"] for p in g["photos"]] == [second["id"], first["id"]]
+        assert c.get(f"/api/v1/gear/{drive}", headers=h).json()["cover"] == other["url"]
+        assert c.post("/api/v1/photos/99999/cover", headers=h).status_code == 404
+
+        # delete: removes the row and the file, cover falls back to the next photo
+        assert c.delete(f"/api/v1/photos/{second['id']}", headers=h).json() == {"ok": True}
+        assert c.get(second["url"]).status_code == 404
+        g = c.get(f"/api/v1/gear/{amp}", headers=h).json()
+        assert [p["id"] for p in g["photos"]] == [first["id"]]
+        assert g["cover"] == first["url"]
+        assert c.delete(f"/api/v1/photos/{second['id']}", headers=h).status_code == 404
+
+        # ownership: gear is shared by everyone on the instance (same as the session routes),
+        # so a member's token can manage photos on gear someone else added...
+        member = c.post("/api/users", json={"username": "bandmate", "password": "password-456"}).json()
+        with TestClient(main.app) as m:
+            assert m.post("/api/login", json={"username": "bandmate", "password": "password-456"}).status_code == 200
+            mh = {"Authorization": f"Bearer {m.post('/api/tokens', json={'name': 'member bot'}).json()['token']}"}
+        assert c.post(f"/api/v1/photos/{other['id']}/cover", headers=mh).status_code == 200
+        # ...until that member is deactivated (403) or the token is revoked (401)
+        assert c.put(f"/api/users/{member['id']}", json={"active": False}).status_code == 200
+        assert c.delete(f"/api/v1/photos/{other['id']}", headers=mh).status_code == 403
+        tid = [t for t in c.get("/api/tokens").json() if t["name"] == "bot"][0]["id"]
+        assert c.delete(f"/api/tokens/{tid}").status_code == 200
+        assert c.delete(f"/api/v1/photos/{other['id']}", headers=h).status_code == 401
+        assert c.get(f"/api/v1/gear/{drive}", headers=h).status_code == 401
+        assert c.get(f"/api/gear/{drive}").json()["cover"] == other["url"]

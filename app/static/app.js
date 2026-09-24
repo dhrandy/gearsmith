@@ -11,6 +11,7 @@ const state = {
   me: null,
   settings: null,
   appName: "Gearsmith",
+  version: "",
   newToken: null, // freshly created API token, shown once until dismissed or you leave Settings
 };
 
@@ -23,6 +24,16 @@ const FEATURE_FOR_TYPE = {
 };
 const STRING_TYPES = [["electric", "Electric"], ["acoustic", "Acoustic"], ["classical", "Classical"], ["bass", "Bass"]];
 const STRING_TYPE_LABEL = Object.fromEntries(STRING_TYPES);
+const MAINT_CATEGORIES = [["setup", "Setup"], ["tubes", "Tubes"], ["fret work", "Fret work"], ["repair", "Repair"], ["other", "Other"]];
+const MAINT_LABEL = Object.fromEntries(MAINT_CATEGORIES);
+
+// Sets-on-hand badge for a strings card: nothing tracked, out, one left, or a plain count.
+function stockBadge(g) {
+  if (g.type !== "strings" || g.sets_on_hand === null || g.sets_on_hand === undefined) return "";
+  if (g.sets_on_hand <= 0) return `<span class="badge stock-out">Out of sets</span>`;
+  if (g.sets_on_hand === 1) return `<span class="badge stock-low">1 set left</span>`;
+  return `<span class="badge">${g.sets_on_hand} sets on hand</span>`;
+}
 
 // One line naming a strings item: "Brand 10-46 (Name)" style, kept short.
 function stringsLabel(s) {
@@ -161,8 +172,10 @@ function route() {
   document.getElementById("tab-sets").hidden = !featureOn("feature_sets");
   document.getElementById("tab-songs").hidden = !featureOn("feature_songs");
   document.getElementById("tab-due").hidden = !featureOn("feature_maintenance");
+  document.getElementById("tab-tuner").hidden = !featureOn("feature_tuner");
   const hash = location.hash || "#/";
   const parts = hash.slice(2).split("/").filter(Boolean);
+  if (parts[0] !== "tuner") stopTuner();
   let tab = "gear";
   if (parts[0] !== "settings") state.newToken = null;
   if (parts[0] === "gear" && parts[1]) { gearDetailView(Number(parts[1])); }
@@ -193,6 +206,7 @@ function route() {
     else setsView();
   }
   else if (parts[0] === "due") { tab = "due"; featureOn("feature_maintenance") ? dueView() : (location.hash = "#/"); }
+  else if (parts[0] === "tuner") { tab = "tuner"; featureOn("feature_tuner") ? tunerView() : (location.hash = "#/"); }
   else if (parts[0] === "settings") { tab = "settings"; settingsView(); }
   else { gearListView(); }
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
@@ -316,6 +330,7 @@ async function gearListView(lifecycle = "owned") {
                   ${g.type === "guitar" ? stringsChip(g.strings) : ""}
                   ${g.type === "strings" && g.specs?.gauge ? `<span class="badge">${esc(g.specs.gauge)}</span>` : ""}
                   ${g.type === "strings" && g.specs?.string_type ? `<span class="badge">${esc(STRING_TYPE_LABEL[g.specs.string_type] || g.specs.string_type)}</span>` : ""}
+                  ${stockBadge(g)}
                   ${lifecycleBadge(g)}
                   ${owned && g.status && g.status !== "home" ? `<span class="badge ${esc(g.status)}">${esc(g.status_label)}</span>` : ""}
                   ${g.sets.length ? `<span class="badge">${g.sets.length} set${g.sets.length > 1 ? "s" : ""}</span>` : ""}
@@ -427,6 +442,11 @@ function gearForm(existing = null, lifecycle = "owned") {
         </div>
         <div><label for="gf-pdate">Purchase date</label><input id="gf-pdate" type="date" value="${esc(g.purchase_date || "")}" /></div>
         <div><label for="gf-pprice">Purchase price</label><input id="gf-pprice" type="number" min="0" step="0.01" value="${g.purchase_price ?? ""}" /></div>
+        <div id="gf-stock-wrap" ${g.type !== "strings" ? "hidden" : ""}>
+          <label for="gf-stock">Sets on hand</label>
+          <input id="gf-stock" type="number" min="0" max="999" value="${g.sets_on_hand ?? ""}" placeholder="Not tracked" />
+        </div>
+        <div class="full"><label for="gf-manual">Manual link (web address)</label><input id="gf-manual" type="url" maxlength="300" value="${esc(g.manual_url || "")}" placeholder="https://..." /></div>
         <div class="full"><label for="gf-notes">Notes</label><textarea id="gf-notes" maxlength="4000">${esc(g.notes || "")}</textarea></div>
       </div>
       <p class="error" id="gf-error"></p>
@@ -443,6 +463,7 @@ function gearForm(existing = null, lifecycle = "owned") {
     document.getElementById("gf-make-label").textContent = MAKE_LABEL[t];
     document.getElementById("gf-interval-wrap").hidden = t !== "guitar";
     document.getElementById("gf-strings-wrap").hidden = t !== "guitar";
+    document.getElementById("gf-stock-wrap").hidden = t !== "strings";
     specsWrap.innerHTML = SPEC_FIELDS[t].map(([key, label, kind, options]) => {
       const value = t === g.type ? (g.specs?.[key] ?? "") : "";
       if (kind === "select") {
@@ -501,6 +522,8 @@ function gearForm(existing = null, lifecycle = "owned") {
       want_price: numOrNull("gf-wprice"),
       sold_date: document.getElementById("gf-sdate").value || null,
       sold_price: numOrNull("gf-sprice"),
+      sets_on_hand: t === "strings" && document.getElementById("gf-stock").value !== "" ? Number(document.getElementById("gf-stock").value) : null,
+      manual_url: document.getElementById("gf-manual").value,
     };
     try {
       const saved = existing
@@ -534,6 +557,7 @@ async function gearDetailView(id) {
       <h1>${esc(g.name)}</h1>
       <div class="row">
         <span id="gd-fav-wrap">${starButton(g, "small star-btn", "Favorite")}</span>
+        ${g.manual_url ? `<a class="btn small" href="${esc(g.manual_url)}" target="_blank" rel="noopener noreferrer">Manual &#8599;</a>` : ""}
         <button class="small" id="gd-edit" type="button">Edit</button>
         <button class="small danger" id="gd-delete" type="button">Delete</button>
       </div>
@@ -583,6 +607,18 @@ async function gearDetailView(id) {
       <div id="restring-history" class="stack" style="margin-top:10px"></div>
     </div>` : ""}
     ${g.type === "strings" ? `
+    <h2>Stock</h2>
+    <div class="card" id="gd-stock">
+      <div class="row" style="justify-content:space-between">
+        <div>${stockBadge(g) || `<span class="muted">Not tracked - set how many unopened sets you have.</span>`}</div>
+        <div class="row">
+          <button class="small" id="stock-dec" type="button" ${g.sets_on_hand ? "" : "disabled"} aria-label="One fewer set">&minus;</button>
+          <button class="small" id="stock-inc" type="button" aria-label="One more set">+</button>
+          <button class="small" id="stock-set" type="button">Set count</button>
+        </div>
+      </div>
+      <p class="hint">Logging a restring with these strings uses one set on its own. Adjust here when you buy or use them another way.</p>
+    </div>
     <h2>Used on</h2>
     <div class="card" id="gd-used-on">
       <div class="set-chips">
@@ -594,12 +630,21 @@ async function gearDetailView(id) {
     <div class="card" id="gd-controls">
       <p class="hint" style="margin:0 0 10px">The knobs and switches on this ${esc(g.type)}, in panel order. Songs use them so you only type the settings.</p>
       <div class="set-chips">
-        ${g.controls.length ? g.controls.map((ct) => `<span class="set-chip">${esc(ct.name)}${ct.kind === "switch" ? ` <span class="muted">switch</span>` : ""}</span>`).join("") : `<span class="muted">No controls listed yet.</span>`}
+        ${g.controls.length ? g.controls.map((ct) => `<span class="set-chip">${esc(ct.name)}${ct.value ? `: <strong>${esc(ct.value)}</strong>` : ""}${ct.kind === "switch" ? ` <span class="muted">switch</span>` : ""}</span>`).join("") : `<span class="muted">No controls listed yet.</span>`}
       </div>
       <div class="row" style="margin-top:12px">
         <button class="small" id="gd-edit-controls" type="button">Edit controls</button>
         ${g.type === "pedal" ? `<label class="toggle"><input type="checkbox" id="gd-modeler" ${g.modeler ? "checked" : ""} /> Modeler / multi-FX (has patches and scenes)</label>` : ""}
       </div>
+    </div>` : ""}
+    ${maintenance ? `
+    <h2>Maintenance</h2>
+    <div class="card" id="gd-maint">
+      <div class="row" style="justify-content:space-between">
+        <span class="hint" style="margin:0">Setups, tube swaps, fret work and repairs.</span>
+        <button class="primary small" id="log-maint" type="button">Log maintenance</button>
+      </div>
+      <div id="maint-history" class="stack" style="margin-top:10px"></div>
     </div>` : ""}
     ${featureOn("feature_songs") ? `<h2>Songs</h2><div class="card" id="gd-songs"><span class="muted">Loading...</span></div>` : ""}
     <h2>Share</h2>
@@ -669,6 +714,27 @@ async function gearDetailView(id) {
     loadRestringHistory(g);
     document.getElementById("log-restring").addEventListener("click", () => restringForm(g));
   }
+  if (g.type === "strings") {
+    const stockSet = async (next) => {
+      try {
+        await api(`/api/gear/${g.id}`, { method: "PATCH", body: { sets_on_hand: next } });
+        gearDetailView(g.id);
+      } catch (ex) { toast(ex.message); }
+    };
+    document.getElementById("stock-inc").addEventListener("click", () => stockSet((g.sets_on_hand ?? 0) + 1));
+    document.getElementById("stock-dec").addEventListener("click", () => stockSet(Math.max(0, (g.sets_on_hand ?? 0) - 1)));
+    document.getElementById("stock-set").addEventListener("click", () => {
+      const answer = prompt("Sets on hand:", String(g.sets_on_hand ?? ""));
+      if (answer === null) return;
+      const n = Math.round(Number(answer));
+      if (!Number.isFinite(n) || n < 0 || n > 999) { toast("Enter a number from 0 to 999"); return; }
+      stockSet(n);
+    });
+  }
+  if (maintenance) {
+    loadMaintenanceHistory(g);
+    document.getElementById("log-maint").addEventListener("click", () => maintenanceForm(g));
+  }
   if (CONTROL_TYPES.includes(g.type)) {
     document.getElementById("gd-edit-controls").addEventListener("click", () => controlsForm(g));
     const mod = document.getElementById("gd-modeler");
@@ -707,12 +773,13 @@ function controlsForm(g) {
   function render() {
     openSheet(`
       <h2>Controls - ${esc(g.name)}</h2>
-      <p class="hint">${esc(CONTROL_HINT[g.type])}. Order them like the panel; songs list them in this order.</p>
+      <p class="hint">${esc(CONTROL_HINT[g.type])}. Order them like the panel; songs list them in this order. The setting is how you keep it dialed in day to day.</p>
       <form id="ct-form" class="stack">
         <div class="stack" id="ct-rows">
           ${rows.map((r, i) => `
             <div class="ct-row">
               <input data-ct-name="${i}" maxlength="40" value="${esc(r.name)}" placeholder="Control name" aria-label="Control ${i + 1} name" />
+              <input data-ct-value="${i}" maxlength="40" value="${esc(r.value || "")}" placeholder="Setting, e.g. 6" aria-label="Control ${i + 1} setting" />
               <select data-ct-kind="${i}" aria-label="Control ${i + 1} kind">
                 <option value="knob" ${r.kind !== "switch" ? "selected" : ""}>Knob</option>
                 <option value="switch" ${r.kind === "switch" ? "selected" : ""}>Switch</option>
@@ -729,6 +796,7 @@ function controlsForm(g) {
         </div>
       </form>`);
     sheetEl.querySelectorAll("[data-ct-name]").forEach((el) => el.addEventListener("input", () => { rows[el.dataset.ctName].name = el.value; }));
+    sheetEl.querySelectorAll("[data-ct-value]").forEach((el) => el.addEventListener("input", () => { rows[el.dataset.ctValue].value = el.value; }));
     sheetEl.querySelectorAll("[data-ct-kind]").forEach((el) => el.addEventListener("change", () => { rows[el.dataset.ctKind].kind = el.value; }));
     sheetEl.querySelectorAll("[data-ct-del]").forEach((el) => el.addEventListener("click", () => { rows.splice(Number(el.dataset.ctDel), 1); render(); }));
     sheetEl.querySelectorAll("[data-ct-up]").forEach((el) => el.addEventListener("click", () => {
@@ -745,7 +813,7 @@ function controlsForm(g) {
     document.getElementById("ct-cancel").addEventListener("click", closeSheet);
     document.getElementById("ct-form").addEventListener("submit", async (e) => {
       e.preventDefault();
-      const controls = rows.filter((r) => r.name.trim()).map((r) => ({ name: r.name.trim(), kind: r.kind }));
+      const controls = rows.filter((r) => r.name.trim()).map((r) => ({ name: r.name.trim(), kind: r.kind, value: (r.value || "").trim() }));
       try {
         await api(`/api/gear/${g.id}`, { method: "PATCH", body: { specs: { controls } } });
         closeSheet();
@@ -782,6 +850,16 @@ async function copyText(value) {
   return ok;
 }
 
+// Draw the share link as a QR code with the bundled qrcode-generator (MIT, Kazuhiko Arase).
+// Everything runs offline: no CDN, no image service, the link never leaves this device.
+function renderQr(box, text) {
+  box.innerHTML = "";
+  const qr = qrcode(0, "M");
+  qr.addData(text);
+  qr.make();
+  box.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 4, scalable: true, title: "QR code for the share link" });
+}
+
 // A share box for one piece of gear or one set: create, copy, set expiry, regenerate, turn off.
 function mountShare(el, kind, id, share) {
   const base = kind === "gear" ? `/api/gear/${id}/share` : `/api/sets/${id}/share`;
@@ -798,6 +876,7 @@ function mountShare(el, kind, id, share) {
       <p class="hint">${esc(expiryText(share))}</p>
       <div class="row" style="margin-top:8px">
         <button class="small primary" type="button" data-share-copy>Copy link</button>
+        <button class="small" type="button" data-share-qr aria-expanded="false">QR code</button>
         <a class="btn small" href="${esc(share.url)}" target="_blank" rel="noopener noreferrer">Open</a>
         <select class="share-expiry" data-share-expiry aria-label="Change expiry">
           <option value="keep" selected>Change expiry...</option>
@@ -805,7 +884,8 @@ function mountShare(el, kind, id, share) {
         </select>
         <button class="small" type="button" data-share-new>New link</button>
         <button class="small danger" type="button" data-share-off>Turn off</button>
-      </div>` : `
+      </div>
+      <div class="qr-box" data-qr-box hidden></div>` : `
       <p class="hint" style="margin:0 0 8px">${share && share.expired ? "The last link expired. " : ""}Make a private link to show ${noun} to someone: read-only, not listed or searchable, and you can turn it off any time.</p>
       <div class="row">
         <select class="share-expiry" data-share-expiry-new aria-label="Link expiry">
@@ -821,6 +901,13 @@ function mountShare(el, kind, id, share) {
         render();
         toast("Share link created");
       } catch (ex) { toast(ex.message); }
+    });
+    if (q("[data-share-qr]")) q("[data-share-qr]").addEventListener("click", () => {
+      const box = q("[data-qr-box]");
+      const btn = q("[data-share-qr]");
+      box.hidden = !box.hidden;
+      btn.setAttribute("aria-expanded", String(!box.hidden));
+      if (!box.hidden) renderQr(box, fullShareUrl(share));
     });
     if (q("[data-share-copy]")) q("[data-share-copy]").addEventListener("click", async () => {
       if (await copyText(fullShareUrl(share))) toast("Link copied");
@@ -910,12 +997,14 @@ function restringForm(g) {
     rsBrand.value = s.make || s.name;
     if (s.specs?.gauge) rsGauge.value = s.specs.gauge;
   }
+  rsBrand.addEventListener("input", () => { rsBrand.dataset.touched = "1"; });
+  rsGauge.addEventListener("input", () => { rsGauge.dataset.touched = "1"; });
   api("/api/gear?type=strings").then((list) => {
     stringsList = list.filter((s) => s.lifecycle === "owned");
     const current = g.strings_id ?? null;
     rsStrings.innerHTML = `<option value="">None - type the brand and gauge</option>` + stringsList.map((s) =>
       `<option value="${s.id}" ${s.id === current ? "selected" : ""}>${esc(stringsLabel({ name: s.name, gauge: s.specs?.gauge }))}</option>`).join("");
-    if (rsStrings.value) fillFromStrings();
+    if (rsStrings.value && !rsBrand.dataset.touched && !rsGauge.dataset.touched) fillFromStrings();
   }).catch(() => {});
   rsStrings.addEventListener("change", fillFromStrings);
   document.getElementById("rs-form").addEventListener("submit", async (e) => {
@@ -936,6 +1025,72 @@ function restringForm(g) {
       gearDetailView(g.id);
     } catch (ex) {
       document.getElementById("rs-error").textContent = ex.message;
+    }
+  });
+}
+
+/* ---------------------------------------------------------------- maintenance log */
+
+async function loadMaintenanceHistory(g) {
+  const rows = await api(`/api/gear/${g.id}/maintenance`);
+  const el = document.getElementById("maint-history");
+  if (!el) return;
+  el.innerHTML = rows.length ? rows.map((r) => `
+    <div class="restring-row maint-row">
+      <span class="rs-date">${fmtDate(r.date)}</span>
+      <span><span class="badge">${esc(MAINT_LABEL[r.category] || r.category)}</span> ${r.note ? esc(r.note) : `<span class="muted">No note</span>`}
+        <span class="muted"> &middot; ${esc(r.logged_by)}</span></span>
+      <span class="row" style="gap:4px;flex-wrap:nowrap">
+        <button class="small ghost" data-editmaint="${r.id}" type="button">Edit</button>
+        <button class="small ghost danger" data-delmaint="${r.id}" type="button">Delete</button>
+      </span>
+    </div>`).join("") : `<p class="muted">Nothing logged yet.</p>`;
+  el.querySelectorAll("[data-editmaint]").forEach((b) => b.addEventListener("click", () => {
+    const entry = rows.find((r) => r.id === Number(b.dataset.editmaint));
+    if (entry) maintenanceForm(g, entry);
+  }));
+  el.querySelectorAll("[data-delmaint]").forEach((b) => b.addEventListener("click", async () => {
+    await api(`/api/maintenance/${b.dataset.delmaint}`, { method: "DELETE" });
+    toast("Entry deleted");
+    gearDetailView(g.id);
+  }));
+}
+
+function maintenanceForm(g, existing = null) {
+  const todayStr = new Date().toLocaleDateString("en-CA");
+  openSheet(`
+    <h2>${existing ? "Edit" : "Log"} maintenance - ${esc(g.name)}</h2>
+    <form id="mt-form" class="stack">
+      <div class="form-grid">
+        <div><label for="mt-date">Date</label><input id="mt-date" type="date" value="${esc(existing?.date || todayStr)}" max="${todayStr}" /></div>
+        <div><label for="mt-cat">Category</label>
+          <select id="mt-cat">
+            ${MAINT_CATEGORIES.map(([k, l]) => `<option value="${k}" ${existing?.category === k ? "selected" : ""}>${l}</option>`).join("")}
+          </select></div>
+        <div class="full"><label for="mt-note">Note</label><input id="mt-note" maxlength="1000" value="${esc(existing?.note || "")}" placeholder="e.g. New power tubes, biased" /></div>
+      </div>
+      <p class="error" id="mt-error"></p>
+      <div class="sheet-actions">
+        <button type="button" id="mt-cancel">Cancel</button>
+        <button class="primary" type="submit">${existing ? "Save changes" : "Log maintenance"}</button>
+      </div>
+    </form>`);
+  document.getElementById("mt-cancel").addEventListener("click", closeSheet);
+  document.getElementById("mt-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const body = {
+      date: document.getElementById("mt-date").value || null,
+      category: document.getElementById("mt-cat").value,
+      note: document.getElementById("mt-note").value,
+    };
+    try {
+      if (existing) await api(`/api/maintenance/${existing.id}`, { method: "PATCH", body });
+      else await api(`/api/gear/${g.id}/maintenance`, { method: "POST", body });
+      closeSheet();
+      toast(existing ? "Saved" : "Maintenance logged");
+      gearDetailView(g.id);
+    } catch (ex) {
+      document.getElementById("mt-error").textContent = ex.message;
     }
   });
 }
@@ -1883,7 +2038,7 @@ async function settingsView() {
         ["feature_picks", "Picks"], ["feature_strings", "Strings (string packs)"], ["feature_sets", "Sets (rigs and boards)"],
         ["feature_maintenance", "Maintenance (restring tracking)"],
         ["feature_songs", "Songs (rig and tone settings per song)"], ["feature_want", "Want list"],
-        ["feature_sold", "Sold archive"],
+        ["feature_sold", "Sold archive"], ["feature_tuner", "Tuner (uses the mic, runs on your device)"],
       ].map(([key, label]) => `
         <label class="toggle"><input type="checkbox" data-feature="${key}" ${settings[key] ? "checked" : ""} ${isAdmin ? "" : "disabled"} /> ${label}</label>`).join("")}
     </div>
@@ -1959,9 +2114,14 @@ async function settingsView() {
       </form>
       <p class="error" id="us-error"></p>
     </div>` : ""}
+    <div class="card settings-section stack">
+      <h2 style="margin-top:0">Backup</h2>
+      <p class="hint">Download the whole collection as one JSON file: gear, photos (stored names and links), sets, songs, presets, restrings, maintenance and string stock. The photo files themselves stay in your data folder.</p>
+      <div class="row"><a class="btn small primary" href="/api/export" download>Download backup (JSON)</a></div>
+    </div>
     <div class="card settings-section">
       <h2 style="margin-top:0">About</h2>
-      <p class="muted">Gearsmith v0.1.0 (beta) · self-hosted, one container, your data stays on your box.</p>
+      <p class="muted">Gearsmith v${esc(state.version || "?")} (beta) · self-hosted, one container, your data stays on your box.</p>
     </div>`;
 
   if (isAdmin) {
@@ -2090,6 +2250,144 @@ async function settingsView() {
   }
 }
 
+/* ---------------------------------------------------------------- tuner
+   Fully client-side: the mic signal stays in the browser, A440 chromatic. */
+
+const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+let tunerStream = null;
+let tunerCtx = null;
+let tunerFrame = 0;
+
+function stopTuner() {
+  if (tunerFrame) cancelAnimationFrame(tunerFrame);
+  tunerFrame = 0;
+  if (tunerStream) tunerStream.getTracks().forEach((t) => t.stop());
+  tunerStream = null;
+  if (tunerCtx) tunerCtx.close().catch(() => {});
+  tunerCtx = null;
+}
+
+// Autocorrelation pitch detection over the mic buffer. Returns Hz, or -1 for silence or noise.
+function detectPitch(buf, sampleRate) {
+  const SIZE = buf.length;
+  let rms = 0;
+  for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
+  rms = Math.sqrt(rms / SIZE);
+  if (rms < 0.01) return -1; // too quiet to call a note
+  let r1 = 0, r2 = SIZE - 1;
+  const thres = 0.2;
+  for (let i = 0; i < SIZE / 2; i++) if (Math.abs(buf[i]) < thres) { r1 = i; break; }
+  for (let i = 1; i < SIZE / 2; i++) if (Math.abs(buf[SIZE - i]) < thres) { r2 = SIZE - i; break; }
+  const trimmed = buf.slice(r1, r2);
+  const N = trimmed.length;
+  if (N < 32) return -1;
+  const corr = new Float32Array(N);
+  for (let lag = 0; lag < N; lag++) {
+    let sum = 0;
+    for (let i = 0; i < N - lag; i++) sum += trimmed[i] * trimmed[i + lag];
+    corr[lag] = sum;
+  }
+  let d = 0;
+  while (d < N - 1 && corr[d] > corr[d + 1]) d++;
+  let maxpos = d, maxval = -1;
+  for (let i = d; i < N; i++) if (corr[i] > maxval) { maxval = corr[i]; maxpos = i; }
+  if (maxpos === 0) return -1;
+  // parabolic interpolation sharpens the peak
+  const x0 = maxpos > 0 ? corr[maxpos - 1] : corr[maxpos];
+  const x1 = corr[maxpos];
+  const x2 = maxpos < N - 1 ? corr[maxpos + 1] : corr[maxpos];
+  const a = (x0 + x2 - 2 * x1) / 2;
+  const b = (x2 - x0) / 2;
+  let period = maxpos;
+  if (a) period = maxpos - b / (2 * a);
+  const freq = sampleRate / period;
+  return freq >= 40 && freq <= 2000 ? freq : -1;
+}
+
+function noteFromFreq(freq) {
+  const n = 12 * Math.log2(freq / 440) + 69;
+  const nearest = Math.round(n);
+  return {
+    name: NOTE_NAMES[((nearest % 12) + 12) % 12],
+    octave: Math.floor(nearest / 12) - 1,
+    cents: Math.round((n - nearest) * 100),
+  };
+}
+
+function tunerView() {
+  stopTuner();
+  view.innerHTML = `
+    <div class="pagehead"><h1>Tuner</h1></div>
+    <p class="muted">Chromatic tuner, A440. It runs fully in your browser - what the mic hears never leaves your device.</p>
+    <div class="card tuner-card">
+      <div class="tuner-note" id="tuner-note">--</div>
+      <div class="tuner-freq muted" id="tuner-freq">&nbsp;</div>
+      <div class="tuner-gauge" aria-hidden="true">
+        <span class="tuner-tick" style="left:2px">-50</span>
+        <span class="tuner-tick mid">0</span>
+        <span class="tuner-tick" style="right:2px">+50</span>
+        <div class="tuner-needle" id="tuner-needle"></div>
+      </div>
+      <div class="tuner-cents muted" id="tuner-cents">&nbsp;</div>
+      <div class="row" style="justify-content:center">
+        <button class="primary" id="tuner-toggle" type="button">Start tuning</button>
+      </div>
+      <p class="error" id="tuner-error"></p>
+    </div>`;
+  const btn = document.getElementById("tuner-toggle");
+  btn.addEventListener("click", async () => {
+    if (tunerStream) { stopTuner(); tunerView(); return; }
+    const err = document.getElementById("tuner-error");
+    err.textContent = "";
+    try {
+      tunerStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      });
+    } catch (ex) {
+      err.textContent = window.isSecureContext
+        ? "Couldn't use the microphone - allow mic access for this site and try again."
+        : "The mic needs HTTPS (or localhost) to work. Open Gearsmith over https to tune.";
+      return;
+    }
+    tunerCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const source = tunerCtx.createMediaStreamSource(tunerStream);
+    const analyser = tunerCtx.createAnalyser();
+    analyser.fftSize = 4096;
+    source.connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    btn.textContent = "Stop";
+    const noteEl = document.getElementById("tuner-note");
+    const freqEl = document.getElementById("tuner-freq");
+    const centsEl = document.getElementById("tuner-cents");
+    const needle = document.getElementById("tuner-needle");
+    const tick = () => {
+      if (!tunerStream) return;
+      analyser.getFloatTimeDomainData(buf);
+      const freq = detectPitch(buf, tunerCtx.sampleRate);
+      if (freq < 0) {
+        noteEl.textContent = "--";
+        noteEl.classList.remove("in-tune");
+        freqEl.innerHTML = "&nbsp;";
+        centsEl.innerHTML = "&nbsp;";
+        needle.style.left = "50%";
+        needle.classList.remove("in-tune");
+      } else {
+        const t = noteFromFreq(freq);
+        noteEl.textContent = t.name + t.octave;
+        freqEl.textContent = freq.toFixed(1) + " Hz";
+        const cents = Math.max(-50, Math.min(50, t.cents));
+        centsEl.textContent = (t.cents > 0 ? "+" : "") + t.cents + " cents";
+        needle.style.left = `${50 + cents}%`;
+        const inTune = Math.abs(t.cents) <= 5;
+        noteEl.classList.toggle("in-tune", inTune);
+        needle.classList.toggle("in-tune", inTune);
+      }
+      tunerFrame = requestAnimationFrame(tick);
+    };
+    tick();
+  });
+}
+
 /* ---------------------------------------------------------------- boot */
 
 async function boot(skipStatus = false) {
@@ -2097,6 +2395,7 @@ async function boot(skipStatus = false) {
     const st = await api("/api/status");
     state.setupRequired = st.setup_required;
     state.appName = st.app_name || "Gearsmith";
+    state.version = st.version || "";
   }
   document.getElementById("app-name").textContent = state.appName;
   try {

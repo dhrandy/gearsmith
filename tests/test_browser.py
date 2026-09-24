@@ -465,3 +465,93 @@ def test_share_link_create_view_and_turn_off(app_url, width, height):
         assert guest.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
         viewer.close()
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_presets_follow_songs_and_artist_view(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        req.post(app_url + "/api/songs", data={"title": "Other Song", "artist": "Second Band"})
+
+        # build a preset in the UI
+        page.get_by_role("link", name="Songs", exact=True).click()
+        page.get_by_role("link", name="Presets", exact=True).click()
+        expect(page.get_by_role("heading", name="Presets")).to_be_visible()
+        page.get_by_role("link", name="Add preset").click()
+        page.locator("#sg-name").fill("Test Crunch")
+        page.locator("#sg-artist").fill("Test Band")
+        page.locator("#sg-amp").select_option(label="Club 20")
+        page.locator("#rig-pick").select_option(label="Demo Drive")
+        page.locator("[data-r-kname='1:0']").fill("Gain")
+        page.locator("[data-r-kval='1:0']").fill("2:00")
+        assert_no_overflow(page, "preset editor")
+        page.get_by_role("button", name="Add preset").click()
+        expect(page.get_by_role("heading", name="Test Crunch")).to_be_visible()
+        expect(page.locator(".chain-item")).to_have_count(2)
+        preset_id = int(page.url.rstrip("/").split("/")[-1])
+
+        # a song that uses it, with a label
+        page.get_by_role("link", name="Songs", exact=True).click()
+        page.get_by_role("link", name="Add song").click()
+        page.locator("#sg-title").fill("Preset Song")
+        page.locator("#sg-artist").fill("test band")
+        page.locator("#preset-pick").select_option(label="Test Crunch (Test Band)")
+        page.locator("#sp-label-0").fill("Verse")
+        assert_no_overflow(page, "song editor with preset")
+        page.get_by_role("button", name="Add song").click()
+        expect(page.get_by_role("heading", name="Preset Song")).to_be_visible()
+        use = page.locator(".preset-use")
+        expect(use).to_contain_text("Verse")
+        expect(use).to_contain_text("Test Crunch")
+        expect(use.locator(".chain-item", has_text="Demo Drive")).to_contain_text("2:00")
+        assert_no_overflow(page, "song with preset")
+        song_url = page.url
+
+        # edit the preset once, the song follows
+        use.get_by_role("link", name="Test Crunch").click()
+        expect(page.locator("#pd-songs")).to_contain_text("Preset Song")
+        page.get_by_role("link", name="Edit", exact=True).click()
+        page.locator("[data-r-kval='1:0']").fill("max")
+        page.get_by_role("button", name="Save preset").click()
+        expect(page.get_by_role("heading", name="Test Crunch")).to_be_visible()
+        page.goto(song_url)
+        expect(page.locator(".preset-use .chain-item", has_text="Demo Drive")).to_contain_text("max")
+
+        # artists view groups case-insensitively, songs and presets together
+        page.get_by_role("link", name="Songs", exact=True).click()
+        page.get_by_role("link", name="Artists", exact=True).click()
+        groups = page.locator(".artist-group")
+        expect(groups).to_have_count(2)
+        band = page.locator(".artist-group", has_text="Test Band")
+        expect(band.locator(".song-card", has_text="Preset Song")).to_be_visible()
+        expect(band.locator(".preset-card", has_text="Test Crunch")).to_be_visible()
+        expect(band.locator("h2")).to_contain_text("1 song · 1 preset")
+        assert_no_overflow(page, "artists view")
+        page.locator("#artist-search").fill("second")
+        expect(groups).to_have_count(1)
+
+        # save a song's own chain as a preset, switching the song over
+        other = [s for s in req.get(app_url + "/api/songs").json() if s["title"] == "Other Song"][0]
+        req.patch(app_url + f"/api/songs/{other['id']}", data={"rig": [{"gear_name": "Loose Pedal", "knobs": [{"name": "Level", "value": "noon"}]}]})
+        page.goto(app_url + f"/#/songs/{other['id']}")
+        page.get_by_role("button", name="Save as preset").click()
+        page.locator("#sp-name").fill("Loose tone")
+        page.get_by_role("button", name="Save preset").click()
+        expect(page.locator(".preset-use")).to_contain_text("Loose tone")
+        assert req.get(app_url + f"/api/songs/{other['id']}").json()["rig"] == []
+
+        # copy back into the song
+        page.get_by_role("button", name="Copy into song").click()
+        page.locator("#cp-confirm").click()
+        expect(page.locator(".preset-use")).to_have_count(0)
+        expect(page.locator(".chain-item")).to_contain_text("noon")
+        assert req.get(app_url + f"/api/presets/{preset_id}").json()["song_count"] == 1
+
+        # presets list
+        page.goto(app_url + "/#/presets")
+        expect(page.locator(".preset-card")).to_have_count(2)
+        assert_no_overflow(page, "presets list")
+        browser.close()

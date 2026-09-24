@@ -707,3 +707,158 @@ def test_song_and_lifecycle_feature_toggles(tmp_path):
         assert s["feature_songs"] and s["feature_want"] and s["feature_sold"]
         s = c.put("/api/settings", json={"feature_songs": False, "feature_sold": False}).json()
         assert (s["feature_songs"], s["feature_want"], s["feature_sold"]) == (False, True, False)
+
+
+def make_preset(c, by_name, name="Crunch", artist="Band A", headers=None):
+    r = c.post("/api/v1/presets" if headers else "/api/presets", headers=headers or {}, json={
+        "name": name, "artist": artist, "amp_id": by_name["Club 20"]["id"],
+        "rig": [{"gear_id": by_name["Demo Drive"]["id"], "engaged": "on", "knobs": [{"name": "Gain", "value": "2:00"}]}],
+        "patches": [{"gear_name": "Floor modeler", "patch_ref": "12B", "scenes": ["verse", "solo"],
+                     "blocks": [{"block_type": "Drive", "model": "Tube Screamer", "params": [{"name": "Drive", "value": "6"}]}]}],
+    })
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_preset_is_a_live_link_from_songs(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        preset = make_preset(c, by_name)
+        assert preset["amp_name"] == "Club 20"
+        assert preset["rig"][0]["knobs"] == [{"name": "Gain", "value": "2:00"}]
+        assert preset["patches"][0]["blocks"][0]["model"] == "Tube Screamer"
+        songs = []
+        for title in ("First", "Second"):
+            r = c.post("/api/songs", json={"title": title, "artist": "Band A",
+                                           "presets": [{"preset_id": preset["id"], "label": "Verse"}]})
+            assert r.status_code == 201
+            songs.append(r.json())
+        assert songs[0]["presets"][0]["label"] == "Verse"
+        assert songs[0]["presets"][0]["preset"]["name"] == "Crunch"
+        # one edit to the preset shows up in every song using it
+        r = c.patch(f"/api/presets/{preset['id']}", json={
+            "name": "Big crunch",
+            "rig": [{"gear_id": by_name["Demo Drive"]["id"], "knobs": [{"name": "Gain", "value": "max"}]}],
+        })
+        assert r.status_code == 200
+        for s in songs:
+            full = c.get(f"/api/songs/{s['id']}").json()
+            assert full["presets"][0]["preset"]["name"] == "Big crunch"
+            assert full["presets"][0]["preset"]["rig"][0]["knobs"][0]["value"] == "max"
+            assert full["presets"][0]["preset"]["patches"][0]["patch_ref"] == "12B"
+        got = c.get(f"/api/presets/{preset['id']}").json()
+        assert got["song_count"] == 2 and {s["title"] for s in got["songs"]} == {"First", "Second"}
+        assert c.get("/api/songs").json()[0]["preset_names"] == ["Big crunch"]
+        # songs using a preset show up on the gear page of gear inside the preset
+        drive_songs = c.get(f"/api/songs?gear_id={by_name['Demo Drive']['id']}").json()
+        assert {s["title"] for s in drive_songs} == {"First", "Second"}
+        # PATCH without presets keeps them; an empty list clears them
+        c.patch(f"/api/songs/{songs[0]['id']}", json={"bpm": 90})
+        assert len(c.get(f"/api/songs/{songs[0]['id']}").json()["presets"]) == 1
+        c.patch(f"/api/songs/{songs[0]['id']}", json={"presets": []})
+        assert c.get(f"/api/songs/{songs[0]['id']}").json()["presets"] == []
+        # unknown preset ids are rejected
+        assert c.post("/api/songs", json={"title": "Bad", "presets": [{"preset_id": 999}]}).status_code == 404
+        # deleting the preset leaves the song, just without the link
+        assert c.delete(f"/api/presets/{preset['id']}").json() == {"ok": True}
+        assert c.get(f"/api/songs/{songs[1]['id']}").json()["presets"] == []
+        assert c.get(f"/api/presets/{preset['id']}").status_code == 404
+        assert c.patch("/api/presets/999", json={"name": "x"}).status_code == 404
+
+
+def test_save_song_as_preset_and_copy_back(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        song = c.post("/api/songs", json={
+            "title": "Own chain", "artist": "Band B", "amp_id": by_name["Club 20"]["id"],
+            "rig": [{"gear_id": by_name["Demo Delay"]["id"], "engaged": "toggle", "knobs": [{"name": "Time", "value": "noon"}]}],
+            "patches": [{"gear_name": "Floor modeler", "patch_ref": "3A", "blocks": [{"block_type": "Reverb"}]}],
+        }).json()
+        # save a copy only: the song keeps its own chain
+        r = c.post(f"/api/songs/{song['id']}/save-as-preset", json={"name": "Ambient"})
+        assert r.status_code == 201
+        kept = r.json()
+        assert kept["artist"] == "Band B" and kept["amp_name"] == "Club 20" and kept["song_count"] == 0
+        assert kept["rig"][0]["engaged"] == "toggle" and kept["patches"][0]["blocks"][0]["block_type"] == "Reverb"
+        assert len(c.get(f"/api/songs/{song['id']}").json()["rig"]) == 1
+        # save and switch the song over to the preset
+        swapped = c.post(f"/api/songs/{song['id']}/save-as-preset", json={"name": "Ambient 2", "use_in_song": True}).json()
+        full = c.get(f"/api/songs/{song['id']}").json()
+        assert full["rig"] == [] and full["patches"] == []
+        assert [p["preset"]["name"] for p in full["presets"]] == ["Ambient 2"]
+        # copy it back into the song to tweak it for this song only
+        link = full["presets"][0]["id"]
+        copied = c.post(f"/api/songs/{song['id']}/presets/{link}/copy").json()
+        assert copied["presets"] == []
+        assert copied["rig"][0]["knobs"] == [{"name": "Time", "value": "noon"}]
+        assert copied["patches"][0]["blocks"][0]["block_type"] == "Reverb"
+        # the preset itself is untouched
+        assert len(c.get(f"/api/presets/{swapped['id']}").json()["rig"]) == 1
+        assert c.post(f"/api/songs/{song['id']}/presets/{link}/copy").status_code == 404
+
+
+def test_artist_grouping(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        for title, artist in (("B side", "the band"), ("A side", "The Band "), ("Solo", "Zed"), ("Loose", "")):
+            assert c.post("/api/songs", json={"title": title, "artist": artist}).status_code == 201
+        make_preset(c, by_name, "Band tone", "THE BAND")
+        make_preset(c, by_name, "Generic", "")
+        groups = c.get("/api/artists").json()
+        names = [g["artist"] for g in groups]
+        assert names[-1] == ""  # songs with no artist come last
+        band = groups[0]
+        assert band["artist"].lower() == "the band" and band["artist"] != "the band"
+        assert (band["song_count"], band["preset_count"]) == (2, 1)
+        assert [s["title"] for s in band["songs"]] == ["A side", "B side"]
+        assert groups[1]["artist"] == "Zed"
+        assert (groups[-1]["song_count"], groups[-1]["preset_count"]) == (1, 1)
+        assert len(c.get("/api/songs?artist=the%20BAND").json()) == 2
+        assert [p["name"] for p in c.get("/api/presets?artist=the band").json()] == ["Band tone"]
+        assert [p["name"] for p in c.get("/api/presets?q=gen").json()] == ["Generic"]
+
+
+def test_presets_and_artists_over_token_api(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        token = c.post("/api/tokens", json={"name": "ai"}).json()["token"]
+        h = {"Authorization": f"Bearer {token}"}
+        assert c.get("/api/v1/presets").status_code == 401
+        preset = make_preset(c, by_name, headers=h)
+        song = c.post("/api/v1/songs", headers=h, json={"title": "Via API", "presets": [{"preset_id": preset["id"]}]})
+        assert song.status_code == 201
+        assert c.get("/api/v1/artists", headers=h).json()[0]["preset_count"] == 1
+        assert c.patch(f"/api/v1/presets/{preset['id']}", headers=h, json={"notes": "bridge pickup"}).status_code == 200
+        assert c.get(f"/api/v1/songs/{song.json()['id']}", headers=h).json()["presets"][0]["preset"]["notes"] == "bridge pickup"
+        # amp must be an amp
+        bad = c.post("/api/v1/presets", headers=h, json={"name": "x", "amp_id": by_name["Starling"]["id"]})
+        assert bad.status_code == 400
+
+
+def test_existing_songs_database_gets_preset_tables(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        c.post("/api/songs", json={"title": "Kept", "rig": [{"gear_name": "Some pedal", "knobs": [{"name": "Level", "value": "1:00"}]}]})
+    with main.db() as conn:
+        for t in ("song_presets", "preset_effect_blocks", "preset_device_patches", "preset_gear_settings", "presets"):
+            conn.execute(f"DROP TABLE {t}")
+    main.init_db()  # a v0.2.0 database starting up on the new version
+    with main.db() as conn:
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        gear_count = conn.execute("SELECT COUNT(*) FROM gear").fetchone()[0]
+    assert {"presets", "preset_gear_settings", "preset_device_patches", "preset_effect_blocks", "song_presets"} <= tables
+    assert gear_count == 6
+    with TestClient(main.app) as c:
+        c.post("/api/login", json={"username": "admin-test", "password": "password-123"})
+        song = c.get("/api/songs").json()[0]
+        assert song["title"] == "Kept" and song["preset_names"] == []
+        assert c.get(f"/api/songs/{song['id']}").json()["rig"][0]["knobs"][0]["value"] == "1:00"

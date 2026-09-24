@@ -1190,3 +1190,36 @@ def test_global_search(app_url, width, height):
         expect(drop).to_be_hidden()
 
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_control_defaults_prefill_song_rigs(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        gear = {g["name"]: g for g in req.get(app_url + "/api/gear").json()}
+        drive = gear["Demo Drive"]["id"]
+        assert req.patch(app_url + f"/api/gear/{drive}", data={"specs": {"controls": [
+            {"name": "Gain", "kind": "knob", "value": "2:00"},
+            {"name": "Tone", "kind": "knob", "value": "noon"},
+            {"name": "Level", "kind": "knob"},
+        ]}}).ok
+
+        # a new song's rig starts from the gear's everyday settings; type over what differs
+        page.goto(app_url + "/#/songs/new")
+        page.locator("#sg-title").fill("Defaults Song")
+        page.locator("#rig-pick").select_option(label="Demo Drive")
+        vals = page.locator("[data-r-kval^='0:']")
+        expect(vals).to_have_count(3)
+        assert [vals.nth(i).input_value() for i in range(3)] == ["2:00", "noon", ""]
+        page.locator("[data-r-kval='0:1']").fill("1:30")
+        page.get_by_role("button", name="Add song").click()
+
+        # the song keeps the override; the gear's defaults stay as they were
+        expect(page.get_by_role("heading", name="Defaults Song")).to_be_visible()
+        expect(page.locator(".chain-item").first).to_contain_text("1:30")
+        controls = req.get(app_url + f"/api/gear/{drive}").json()["controls"]
+        assert [c.get("value") for c in controls] == ["2:00", "noon", None]
+        browser.close()

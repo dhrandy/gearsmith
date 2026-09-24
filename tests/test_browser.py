@@ -959,3 +959,155 @@ def test_tuner_alternate_tunings(app_url, width, height):
         picker.select_option("chromatic")
         expect(page.locator("#tuner-strings")).to_be_hidden()
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_pedalboard_order_moves_and_drags(app_url, width, height):
+    s = httpx.Client(base_url=app_url)
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        s.cookies = {c["name"]: c["value"] for c in page.context.cookies()}
+        for name in ("Demo Reverb", "Demo Tuner"):
+            gid = s.post("/api/gear", json={"type": "pedal", "name": name, "specs": {"ma_draw": 10}}).json()["id"]
+            board = s.get("/api/sets").json()[0]
+            s.patch(f"/api/sets/{board['id']}", json={"item_ids": [i["id"] for i in board["items"]] + [gid]})
+        page.goto(app_url + f"/#/sets/{board['id']}")
+
+        pedals = page.locator(".board-pedal .board-name")
+        expect(page.get_by_role("heading", name="Pedalboard")).to_be_visible()
+        expect(page.locator(".board-end").first).to_contain_text("Starling")
+        expect(page.locator(".board-end").last).to_contain_text("Club 20")
+        expect(page.get_by_text("Power: 75 mA total")).to_be_visible()
+        start = pedals.all_inner_texts()
+        assert start[-1] == "Demo Tuner"
+
+        # usual chain order: tuner first, drive, delay, reverb last
+        page.get_by_role("button", name="Suggest order").click()
+        expect(pedals).to_have_text(["Demo Tuner", "Demo Drive", "Demo Delay", "Demo Reverb"])
+
+        # arrow buttons move one step and save
+        page.get_by_role("button", name="Move Demo Drive later").click()
+        expect(pedals).to_have_text(["Demo Tuner", "Demo Delay", "Demo Drive", "Demo Reverb"])
+
+        # drag by the handle: reverb onto the first pedal
+        grip = page.get_by_role("button", name="Drag Demo Reverb")
+        target = page.locator(".board-pedal").first.bounding_box()
+        box = grip.bounding_box()
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(target["x"] + 8, target["y"] + 8, steps=8)
+        page.mouse.up()
+        expect(pedals).to_have_text(["Demo Reverb", "Demo Tuner", "Demo Delay", "Demo Drive"])
+
+        # the order is saved on the set
+        page.reload()
+        expect(pedals).to_have_text(["Demo Reverb", "Demo Tuner", "Demo Delay", "Demo Drive"])
+        saved = [i["name"] for i in s.get(f"/api/sets/{board['id']}").json()["items"] if i["type"] == "pedal"]
+        assert saved == ["Demo Reverb", "Demo Tuner", "Demo Delay", "Demo Drive"]
+
+        # editing the set keeps the board order
+        page.get_by_role("button", name="Edit", exact=True).click()
+        page.get_by_role("button", name="Save changes").click()
+        page.reload()
+        expect(pedals).to_have_text(["Demo Reverb", "Demo Tuner", "Demo Delay", "Demo Drive"])
+        assert_no_overflow(page, "pedalboard")
+        page.screenshot(path=f"/tmp/board-{width}.png", full_page=True)
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_setlist_builder_shows_presets_per_song(app_url, width, height):
+    s = httpx.Client(base_url=app_url)
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        s.cookies = {c["name"]: c["value"] for c in page.context.cookies()}
+        gear = {g["name"]: g["id"] for g in s.get("/api/gear").json()}
+        preset = s.post("/api/presets", json={"name": "Big Crunch", "rig": [
+            {"gear_id": gear["Demo Drive"], "knobs": [{"name": "Gain", "value": "7"}]}]}).json()
+        s.post("/api/songs", json={"title": "Opener", "tuning": "E standard", "guitar_id": gear["Starling"],
+                                   "presets": [{"preset_id": preset["id"], "label": "Verse"}]})
+        s.post("/api/songs", json={"title": "Heavy One", "tuning": "Drop D", "guitar_id": gear["Starling"],
+                                   "rig": [{"gear_id": gear["Demo Delay"], "knobs": [{"name": "Mix", "value": "30%"}]}]})
+        s.post("/api/songs", json={"title": "Closer", "tuning": "Drop D", "guitar_id": gear["Heron"]})
+
+        page.get_by_role("link", name="Songs", exact=True).click()
+        page.get_by_role("link", name="Setlists").click()
+        expect(page.get_by_text("No setlists yet")).to_be_visible()
+        page.get_by_role("button", name="New setlist").click()
+        page.locator("#sl-name").fill("Tuesday practice")
+        page.get_by_role("button", name="Create setlist").click()
+        expect(page.get_by_role("heading", name="Tuesday practice")).to_be_visible()
+
+        # tick songs in play order
+        page.get_by_role("button", name="Add songs").click()
+        for title in ("Heavy One", "Opener", "Closer"):
+            page.locator("#sl-pick label", has_text=title).locator("input").check()
+        page.locator("#sl-pick-add").click()
+        titles = page.locator(".sl-title a")
+        expect(titles).to_have_text(["Heavy One", "Opener", "Closer"])
+
+        # the settings sit next to each song: a preset's knobs, or the song's own
+        first, second = page.locator(".setlist-entry").nth(0), page.locator(".setlist-entry").nth(1)
+        expect(first.locator(".sl-settings")).to_contain_text("Mix")
+        expect(second.locator(".sl-settings")).to_contain_text("Big Crunch")
+        expect(second.locator(".sl-settings .knob")).to_contain_text("Gain")
+        expect(second.get_by_text("Retune to E standard")).to_be_visible()
+        expect(page.locator(".setlist-entry").nth(2).get_by_text("Switch to Heron")).to_be_visible()
+
+        # reorder with the arrows and remove
+        page.get_by_role("button", name="Move Opener up").click()
+        expect(titles).to_have_text(["Opener", "Heavy One", "Closer"])
+        page.get_by_role("button", name="Remove Closer").click()
+        expect(titles).to_have_text(["Opener", "Heavy One"])
+        page.reload()
+        expect(titles).to_have_text(["Opener", "Heavy One"])
+        assert_no_overflow(page, "setlist")
+        page.screenshot(path=f"/tmp/setlist-{width}.png", full_page=True)
+
+        page.get_by_role("link", name="Setlists").first.click()
+        expect(page.locator(".setlist-card")).to_contain_text("Opener › Heavy One")
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_price_paid_value_and_collection_total(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        expect(page.locator("#collection-total")).to_have_count(0)
+
+        page.get_by_role("link", name=re.compile("Starling")).first.click()
+        page.get_by_role("button", name="Edit", exact=True).click()
+        page.locator("#gf-pprice").fill("900")
+        page.locator("#gf-value").fill("1150")
+        page.get_by_role("button", name="Save changes").click()
+        expect(page.get_by_text("$1,150 (+$250)")).to_be_visible()
+
+        page.get_by_role("link", name="Gear", exact=True).click()
+        total = page.locator("#collection-total")
+        expect(total).to_contain_text("Collection value")
+        expect(total).to_contain_text("$1,150")
+        expect(total).to_contain_text("Paid $900")
+        expect(total).to_contain_text("Up $250")
+        assert_no_overflow(page, "gear totals")
+        page.screenshot(path=f"/tmp/totals-{width}.png")
+
+        # the want list is totalled on its own page, not in the collection
+        page.get_by_role("button", name="Add gear").click()
+        page.locator("#gf-life").select_option("want")
+        expect(page.locator("#gf-value")).to_be_hidden()
+        page.locator("#gf-name").fill("Dream Guitar")
+        page.locator("#gf-wprice").fill("3000")
+        page.get_by_role("button", name="Add gear", exact=True).last.click()
+        expect(page.get_by_role("heading", name="Dream Guitar")).to_be_visible()
+        page.goto(app_url + "/#/want")
+        expect(page.locator("#collection-total")).to_contain_text("$3,000")
+        page.get_by_role("link", name="Owned").click()
+        expect(page.locator("#collection-total")).to_contain_text("$1,150")
+        expect(page.locator("#collection-total")).not_to_contain_text("3,000")
+        browser.close()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from html import escape as html_escape
 import json
 import os
 import re
@@ -20,7 +21,7 @@ from typing import Any, Literal
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, field_validator
@@ -53,12 +54,20 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks"}
 GEAR_STATUS = ("", "home", "luthier", "lent")
 GEAR_STATUS_LABELS = {"": "Unspecified", "home": "Home", "luthier": "At the luthier", "lent": "Lent out"}
+# Lifecycle is separate from status: status says where owned gear is, lifecycle says whether
+# you own it yet (want), own it, or used to (sold, kept as history).
+LIFECYCLES = ("owned", "want", "sold")
+LIFECYCLE_LABELS = {"owned": "Owned", "want": "Want", "sold": "Sold"}
+# Gear types that can carry a list of named controls (knobs and switches) for song settings.
+CONTROL_TYPES = ("guitar", "amp", "pedal")
+CONTROL_KINDS = ("knob", "switch")
+MAX_CONTROLS = 40
 
 # Per-type spec sheet fields: (key, label, numeric?). Values live in the gear.specs JSON column.
 SPEC_FIELDS: dict[str, list[tuple[str, str, bool]]] = {
@@ -266,6 +275,10 @@ def init_db() -> None:
           notes TEXT NOT NULL DEFAULT '',
           restring_interval_days INTEGER,
           favorite INTEGER NOT NULL DEFAULT 0,
+          lifecycle TEXT NOT NULL DEFAULT 'owned',
+          want_price REAL,
+          sold_date TEXT,
+          sold_price REAL,
           created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
@@ -301,7 +314,80 @@ def init_db() -> None:
           sort INTEGER NOT NULL DEFAULT 0,
           PRIMARY KEY (set_id, gear_id)
         );
+        CREATE TABLE IF NOT EXISTS shares (
+          id INTEGER PRIMARY KEY,
+          token TEXT NOT NULL UNIQUE,
+          gear_id INTEGER UNIQUE REFERENCES gear(id) ON DELETE CASCADE,
+          set_id INTEGER UNIQUE REFERENCES sets(id) ON DELETE CASCADE,
+          expires_at TEXT,
+          created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL,
+          CHECK ((gear_id IS NULL) != (set_id IS NULL))
+        );
+        CREATE TABLE IF NOT EXISTS songs (
+          id INTEGER PRIMARY KEY,
+          title TEXT NOT NULL,
+          artist TEXT NOT NULL DEFAULT '',
+          tuning TEXT NOT NULL DEFAULT '',
+          capo INTEGER,
+          song_key TEXT NOT NULL DEFAULT '',
+          bpm INTEGER,
+          guitar_id INTEGER REFERENCES gear(id) ON DELETE SET NULL,
+          guitar_name TEXT NOT NULL DEFAULT '',
+          amp_id INTEGER REFERENCES gear(id) ON DELETE SET NULL,
+          amp_name TEXT NOT NULL DEFAULT '',
+          set_id INTEGER REFERENCES sets(id) ON DELETE SET NULL,
+          set_name TEXT NOT NULL DEFAULT '',
+          notes TEXT NOT NULL DEFAULT '',
+          created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS song_gear_settings (
+          id INTEGER PRIMARY KEY,
+          song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+          gear_id INTEGER REFERENCES gear(id) ON DELETE SET NULL,
+          gear_name TEXT NOT NULL DEFAULT '',
+          position INTEGER NOT NULL DEFAULT 0,
+          engaged TEXT NOT NULL DEFAULT 'on',
+          knobs TEXT NOT NULL DEFAULT '[]',
+          note TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS song_device_patches (
+          id INTEGER PRIMARY KEY,
+          song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+          gear_id INTEGER REFERENCES gear(id) ON DELETE SET NULL,
+          gear_name TEXT NOT NULL DEFAULT '',
+          position INTEGER NOT NULL DEFAULT 0,
+          patch_ref TEXT NOT NULL DEFAULT '',
+          patch_name TEXT NOT NULL DEFAULT '',
+          scenes TEXT NOT NULL DEFAULT '[]',
+          midi TEXT,
+          note TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS song_effect_blocks (
+          id INTEGER PRIMARY KEY,
+          patch_id INTEGER NOT NULL REFERENCES song_device_patches(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL DEFAULT 0,
+          slot TEXT NOT NULL DEFAULT '',
+          block_type TEXT NOT NULL DEFAULT '',
+          model TEXT NOT NULL DEFAULT '',
+          enabled INTEGER NOT NULL DEFAULT 1,
+          params TEXT NOT NULL DEFAULT '[]',
+          scene_overrides TEXT
+        );
+        CREATE TABLE IF NOT EXISTS song_photos (
+          id INTEGER PRIMARY KEY,
+          song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+          filename TEXT NOT NULL,
+          sort INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
         CREATE INDEX IF NOT EXISTS idx_gear_type ON gear(type);
+        CREATE INDEX IF NOT EXISTS idx_song_settings ON song_gear_settings(song_id, position);
+        CREATE INDEX IF NOT EXISTS idx_song_patches ON song_device_patches(song_id, position);
+        CREATE INDEX IF NOT EXISTS idx_song_blocks ON song_effect_blocks(patch_id, position);
+        CREATE INDEX IF NOT EXISTS idx_song_photos ON song_photos(song_id);
         CREATE INDEX IF NOT EXISTS idx_restrings_gear ON restrings(gear_id, date);
         CREATE INDEX IF NOT EXISTS idx_photos_gear ON gear_photos(gear_id);
         """
@@ -317,6 +403,15 @@ def migrate(c) -> None:
     gear_cols = {r["name"] for r in c.execute("PRAGMA table_info(gear)")}
     if "favorite" not in gear_cols:
         c.execute("ALTER TABLE gear ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
+    # Want/owned/sold lifecycle. Everything that existed before is gear you own.
+    if "lifecycle" not in gear_cols:
+        c.execute("ALTER TABLE gear ADD COLUMN lifecycle TEXT NOT NULL DEFAULT 'owned'")
+    if "want_price" not in gear_cols:
+        c.execute("ALTER TABLE gear ADD COLUMN want_price REAL")
+    if "sold_date" not in gear_cols:
+        c.execute("ALTER TABLE gear ADD COLUMN sold_date TEXT")
+    if "sold_price" not in gear_cols:
+        c.execute("ALTER TABLE gear ADD COLUMN sold_price REAL")
 
 
 def seed_example(c) -> None:
@@ -571,7 +666,7 @@ def me(request: Request):
 # ---------------------------------------------------------------- optional features
 
 # Hideable sections: each gear type, sets, and the maintenance loop.
-FEATURES = ("guitars", "amps", "pedals", "picks", "sets", "maintenance")
+FEATURES = ("guitars", "amps", "pedals", "picks", "sets", "maintenance", "songs", "want", "sold")
 FEATURE_LABELS = {
     "guitars": "Guitars section",
     "amps": "Amps section",
@@ -579,6 +674,9 @@ FEATURE_LABELS = {
     "picks": "Picks section",
     "sets": "Sets (rigs and boards)",
     "maintenance": "Maintenance (restring tracking)",
+    "songs": "Songs (rig and tone settings per song)",
+    "want": "Want list",
+    "sold": "Sold archive",
 }
 FEATURE_FOR_TYPE = {"guitar": "guitars", "amp": "amps", "pedal": "pedals", "pick": "picks"}
 
@@ -590,11 +688,43 @@ def feature_on(c, name: str) -> bool:
 # ---------------------------------------------------------------- gear
 
 
+def clean_controls(value: Any) -> list[dict[str, str]]:
+    """A gear item's control names, e.g. [{"name": "Gain", "kind": "knob"}], in panel order."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise HTTPException(400, "Controls must be a list")
+    if len(value) > MAX_CONTROLS:
+        raise HTTPException(400, f"At most {MAX_CONTROLS} controls")
+    out: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in value:
+        if isinstance(item, str):
+            item = {"name": item}
+        if not isinstance(item, dict):
+            raise HTTPException(400, "Each control needs a name")
+        name = str(item.get("name") or "").strip()[:40]
+        if not name or name.lower() in seen:
+            continue
+        kind = str(item.get("kind") or "knob").strip().lower()
+        if kind not in CONTROL_KINDS:
+            raise HTTPException(400, "Control kind must be knob or switch")
+        seen.add(name.lower())
+        out.append({"name": name, "kind": kind})
+    return out
+
+
 def clean_specs(type_: str, specs: dict[str, Any] | None) -> dict[str, Any]:
     """Keep only the fields that belong to this gear type, coerced to text or numbers."""
     out: dict[str, Any] = {}
     allowed = {key: (label, numeric) for key, label, numeric in SPEC_FIELDS[type_]}
     for key, value in (specs or {}).items():
+        if key == "controls" and type_ in CONTROL_TYPES:
+            out["controls"] = clean_controls(value)
+            continue
+        if key == "modeler" and type_ == "pedal":
+            out["modeler"] = bool(value)
+            continue
         if key not in allowed or value is None:
             continue
         label, numeric = allowed[key]
@@ -702,7 +832,15 @@ def gear_dict(c, row, on: date | None = None) -> dict[str, Any]:
         "notes": row["notes"],
         "restring_interval_days": row["restring_interval_days"],
         "favorite": bool(row["favorite"]),
-        "strings": strings_info(c, row, on),
+        "lifecycle": row["lifecycle"],
+        "lifecycle_label": LIFECYCLE_LABELS.get(row["lifecycle"], row["lifecycle"]),
+        "want_price": row["want_price"],
+        "sold_date": row["sold_date"],
+        "sold_price": row["sold_price"],
+        "controls": specs.get("controls", []),
+        "modeler": bool(specs.get("modeler")),
+        "share": share_info(c, "gear", row["id"]),
+        "strings": strings_info(c, row, on) if row["lifecycle"] == "owned" else None,
         "photos": photos,
         "cover": photos[0]["url"] if photos else None,
         "sets": gear_sets(c, row["id"]),
@@ -731,8 +869,12 @@ class GearIn(BaseModel):
     notes: str = Field(default="", max_length=4000)
     restring_interval_days: int | None = Field(default=None, ge=1, le=730)
     favorite: bool | None = None
+    lifecycle: Literal["owned", "want", "sold"] | None = None
+    want_price: float | None = Field(default=None, ge=0, le=10_000_000)
+    sold_date: str | None = None
+    sold_price: float | None = Field(default=None, ge=0, le=10_000_000)
 
-    @field_validator("purchase_date")
+    @field_validator("purchase_date", "sold_date")
     @classmethod
     def _date(cls, v):
         return check_date(v)
@@ -751,8 +893,12 @@ class GearPatch(BaseModel):
     notes: str | None = Field(default=None, max_length=4000)
     restring_interval_days: int | None = Field(default=None, ge=1, le=730)
     favorite: bool | None = None
+    lifecycle: Literal["owned", "want", "sold"] | None = None
+    want_price: float | None = Field(default=None, ge=0, le=10_000_000)
+    sold_date: str | None = None
+    sold_price: float | None = Field(default=None, ge=0, le=10_000_000)
 
-    @field_validator("purchase_date")
+    @field_validator("purchase_date", "sold_date")
     @classmethod
     def _date(cls, v):
         return check_date(v)
@@ -764,13 +910,15 @@ def create_gear(c, body: GearIn, user_id: int | None) -> int:
     stamp = now_iso()
     return c.execute(
         """INSERT INTO gear(type,name,make,model,year,serial,specs,status,purchase_date,
-           purchase_price,notes,restring_interval_days,favorite,created_by,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           purchase_price,notes,restring_interval_days,favorite,lifecycle,want_price,sold_date,
+           sold_price,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             body.type, body.name.strip(), body.make.strip(), body.model.strip(), body.year,
             body.serial.strip(), json.dumps(clean_specs(body.type, body.specs)), body.status,
             body.purchase_date, body.purchase_price, body.notes.strip(), body.restring_interval_days,
-            int(bool(body.favorite)), user_id, stamp, stamp,
+            int(bool(body.favorite)), body.lifecycle or "owned", body.want_price, body.sold_date,
+            body.sold_price, user_id, stamp, stamp,
         ),
     ).lastrowid
 
@@ -788,6 +936,9 @@ def patch_gear(c, row, body: GearPatch) -> None:
         favorite = data.pop("favorite")
         if favorite is not None:
             data["favorite"] = int(favorite)
+    if "lifecycle" in data and data["lifecycle"] is None:
+        # same rule as favorite: null leaves the lifecycle alone
+        data.pop("lifecycle")
     if "name" in data:
         data["name"] = data["name"].strip()
     for key in ("make", "model", "serial", "notes"):
@@ -798,19 +949,30 @@ def patch_gear(c, row, body: GearPatch) -> None:
     c.execute(f"UPDATE gear SET {cols} WHERE id=?", (*data.values(), row["id"]))
 
 
+def list_gear_rows(c, type_: str | None = None, lifecycle: str | None = None) -> list[dict[str, Any]]:
+    where, params = [], []
+    if type_:
+        if type_ not in GEAR_TYPES:
+            raise HTTPException(400, "Unknown gear type")
+        where.append("type=?")
+        params.append(type_)
+    if lifecycle:
+        if lifecycle not in LIFECYCLES:
+            raise HTTPException(400, "Lifecycle must be owned, want, or sold")
+        where.append("lifecycle=?")
+        params.append(lifecycle)
+    sql = "SELECT * FROM gear"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY type, favorite DESC, name COLLATE NOCASE"
+    return [gear_dict(c, r) for r in c.execute(sql, params)]
+
+
 @app.get("/api/gear")
-def list_gear(request: Request, type: str | None = None):
+def list_gear(request: Request, type: str | None = None, lifecycle: str | None = None):
     current_user(request)
     with db() as c:
-        sql = "SELECT * FROM gear"
-        params: tuple = ()
-        if type:
-            if type not in GEAR_TYPES:
-                raise HTTPException(400, "Unknown gear type")
-            sql += " WHERE type=?"
-            params = (type,)
-        sql += " ORDER BY type, favorite DESC, name COLLATE NOCASE"
-        return [gear_dict(c, r) for r in c.execute(sql, params)]
+        return list_gear_rows(c, type, lifecycle)
 
 
 @app.get("/api/gear/{gear_id}")
@@ -949,7 +1111,9 @@ def due_items(c, horizon: int = 7, on: date | None = None) -> list[dict[str, Any
     """Guitars whose strings are overdue or coming due within `horizon` days."""
     on = on or today()
     out = []
-    rows = c.execute("SELECT * FROM gear WHERE type='guitar' ORDER BY name COLLATE NOCASE").fetchall()
+    rows = c.execute(
+        "SELECT * FROM gear WHERE type='guitar' AND lifecycle='owned' ORDER BY name COLLATE NOCASE"
+    ).fetchall()
     for row in rows:
         info = strings_info(c, row, on)
         if not info or info["state"] == "never":
@@ -999,6 +1163,7 @@ def set_dict(c, row) -> dict[str, Any]:
         "id": row["id"],
         "name": row["name"],
         "notes": row["notes"],
+        "share": share_info(c, "set", row["id"]),
         "items": [
             {
                 "id": g["id"],
@@ -1230,6 +1395,876 @@ def get_photo(name: str, request: Request):
     return FileResponse(path)
 
 
+# ---------------------------------------------------------------- share links
+# Optional read-only public links for one piece of gear or a whole set. The token is random
+# and unguessable, pages are noindex/nofollow, links can expire, and deleting or regenerating
+# a link kills the old URL right away.
+
+SHARE_FAIL_LIMIT = 30
+SHARE_FAIL_WINDOW_SECONDS = 15 * 60
+SHARE_MAX_DAYS = 365
+_share_failures: dict[str, deque[float]] = defaultdict(deque)
+NOINDEX = "noindex, nofollow, noarchive, nosnippet, noimageindex"
+SHARE_HEADERS = {"X-Robots-Tag": NOINDEX, "Cache-Control": "private, no-store"}
+
+
+def share_info(c, kind: str, target_id: int) -> dict[str, Any] | None:
+    col = "gear_id" if kind == "gear" else "set_id"
+    row = c.execute(f"SELECT token, created_at, expires_at FROM shares WHERE {col}=?", (target_id,)).fetchone()
+    if not row:
+        return None
+    expired = bool(row["expires_at"] and row["expires_at"] <= now_iso())
+    return {
+        "url": f"/share/{row['token']}",
+        "token": row["token"],
+        "created_at": row["created_at"],
+        "expires_at": row["expires_at"],
+        "expired": expired,
+    }
+
+
+class ShareIn(BaseModel):
+    expires_in_days: int | None = Field(
+        default=None, ge=1, le=SHARE_MAX_DAYS, description="Days until the link stops working; leave out for no expiry"
+    )
+    regenerate: bool = Field(default=False, description="Replace an existing link with a new URL")
+
+
+def create_share(c, kind: str, target_id: int, user_id: int | None, body: ShareIn | None) -> dict[str, Any]:
+    body = body or ShareIn()
+    if kind == "gear":
+        get_gear_row(c, target_id)
+    else:
+        get_set_row(c, target_id)
+    col = "gear_id" if kind == "gear" else "set_id"
+    existing = share_info(c, kind, target_id)
+    expires = (
+        (datetime.now(timezone.utc) + timedelta(days=body.expires_in_days)).isoformat()
+        if body.expires_in_days
+        else None
+    )
+    if existing and not body.regenerate and not existing["expired"]:
+        # Same URL, new expiry: lets you extend or clear the expiry without breaking the link.
+        if "expires_in_days" in body.model_fields_set:
+            c.execute(f"UPDATE shares SET expires_at=? WHERE {col}=?", (expires, target_id))
+        return share_info(c, kind, target_id)
+    c.execute(f"DELETE FROM shares WHERE {col}=?", (target_id,))
+    c.execute(
+        f"INSERT INTO shares(token,{col},expires_at,created_by,created_at) VALUES(?,?,?,?,?)",
+        (secrets.token_urlsafe(24), target_id, expires, user_id, now_iso()),
+    )
+    return share_info(c, kind, target_id)
+
+
+def revoke_share(c, kind: str, target_id: int) -> dict[str, Any]:
+    if kind == "gear":
+        get_gear_row(c, target_id)
+    else:
+        get_set_row(c, target_id)
+    col = "gear_id" if kind == "gear" else "set_id"
+    c.execute(f"DELETE FROM shares WHERE {col}=?", (target_id,))
+    return {"ok": True}
+
+
+def share_row(c, token: str, request: Request):
+    """The live share for this token, or a plain 404 (unknown, revoked and expired look the same)."""
+    ip = client_ip(request)
+    with _api_lock:
+        retry = _window(_share_failures[ip], SHARE_FAIL_LIMIT, SHARE_FAIL_WINDOW_SECONDS, False)
+    if retry:
+        raise HTTPException(429, "Too many requests", headers={"Retry-After": str(retry), **SHARE_HEADERS})
+    row = None
+    if re.fullmatch(r"[A-Za-z0-9_-]{20,64}", token or ""):
+        row = c.execute(
+            "SELECT * FROM shares WHERE token=? AND (expires_at IS NULL OR expires_at>?)", (token, now_iso())
+        ).fetchone()
+    if not row:
+        with _api_lock:
+            _share_failures[ip].append(time.monotonic())
+        raise HTTPException(404, "Not found", headers=SHARE_HEADERS)
+    return row
+
+
+def h(value: Any) -> str:
+    return html_escape(str(value if value is not None else ""), quote=True)
+
+
+def share_facts(row) -> list[tuple[str, Any]]:
+    """What a shared page shows about an item: make, model, year and specs. Never the serial
+    number, prices, or who added it."""
+    specs = json.loads(row["specs"] or "{}")
+    facts = [("Brand" if row["type"] == "pick" else "Make", row["make"]), ("Model", row["model"]), ("Year", row["year"])]
+    facts += [(label, specs.get(key)) for key, label, _ in SPEC_FIELDS[row["type"]]]
+    return [(k, v) for k, v in facts if v not in (None, "")]
+
+
+def share_photo_url(token: str, filename: str) -> str:
+    return f"/share/{h(token)}/photos/{h(filename)}"
+
+
+def share_shell(title: str, body: str) -> str:
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<meta name="robots" content="{NOINDEX}" />
+<meta name="referrer" content="no-referrer" />
+<title>{h(title)}</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body class="share-page">
+<main class="wrap share">
+{body}
+<p class="share-foot">Shared read-only.</p>
+</main>
+</body>
+</html>"""
+
+
+def gear_share_html(c, row, token: str) -> str:
+    photos = c.execute("SELECT filename FROM gear_photos WHERE gear_id=? ORDER BY sort, id", (row["id"],)).fetchall()
+    photo_html = "".join(
+        f'<img src="{share_photo_url(token, p["filename"])}" alt="Photo of {h(row["name"])}" />' for p in photos
+    )
+    facts = share_facts(row)
+    fact_html = "".join(f'<div class="fact"><span>{h(k)}</span>{h(v)}</div>' for k, v in facts)
+    parts = [
+        f'<p class="share-type">{h(GEAR_TYPE_LABELS[row["type"]][:-1])}{" · sold" if row["lifecycle"] == "sold" else ""}</p>',
+        f'<h1>{h(row["name"])}</h1>',
+        f'<div class="share-photos">{photo_html}</div>' if photo_html else "",
+        f'<div class="facts">{fact_html}</div>' if fact_html else "",
+        f'<h2>Notes</h2><p class="notes">{h(row["notes"])}</p>' if row["notes"] else "",
+    ]
+    return share_shell(row["name"], "\n".join(p for p in parts if p))
+
+
+def set_share_html(c, set_row, token: str) -> str:
+    items = c.execute(
+        """SELECT g.* FROM gear g JOIN set_items si ON si.gear_id=g.id
+        WHERE si.set_id=? ORDER BY si.sort, g.name COLLATE NOCASE""",
+        (set_row["id"],),
+    ).fetchall()
+    cards = []
+    for g in items:
+        cover = c.execute(
+            "SELECT filename FROM gear_photos WHERE gear_id=? ORDER BY sort, id LIMIT 1", (g["id"],)
+        ).fetchone()
+        facts = share_facts(g)
+        cards.append(
+            f"""<section class="share-item">
+  <div class="share-thumb">{f'<img src="{share_photo_url(token, cover["filename"])}" alt="" />' if cover else ""}</div>
+  <div class="share-item-body">
+    <p class="share-type">{h(GEAR_TYPE_LABELS[g["type"]][:-1])}</p>
+    <h2>{h(g["name"])}</h2>
+    {'<div class="facts">' + "".join(f'<div class="fact"><span>{h(k)}</span>{h(v)}</div>' for k, v in facts) + "</div>" if facts else ""}
+    {f'<p class="notes">{h(g["notes"])}</p>' if g["notes"] else ""}
+  </div>
+</section>"""
+        )
+    parts = [
+        '<p class="share-type">Set</p>',
+        f'<h1>{h(set_row["name"])}</h1>',
+        f'<p class="notes">{h(set_row["notes"])}</p>' if set_row["notes"] else "",
+        f'<p class="muted">{len(items)} item{"s" if len(items) != 1 else ""}</p>',
+        "".join(cards) or '<p class="muted">This set is empty.</p>',
+    ]
+    return share_shell(set_row["name"], "\n".join(p for p in parts if p))
+
+
+@app.get("/share/{token}", include_in_schema=False)
+def share_page(token: str, request: Request):
+    with db() as c:
+        share = share_row(c, token, request)
+        if share["gear_id"]:
+            body = gear_share_html(c, get_gear_row(c, share["gear_id"]), token)
+        else:
+            body = set_share_html(c, get_set_row(c, share["set_id"]), token)
+    return HTMLResponse(body, headers=SHARE_HEADERS)
+
+
+@app.get("/share/{token}/photos/{name}", include_in_schema=False)
+def share_photo(token: str, name: str, request: Request):
+    with db() as c:
+        share = share_row(c, token, request)
+        if share["gear_id"]:
+            ok = c.execute(
+                "SELECT 1 FROM gear_photos WHERE gear_id=? AND filename=?", (share["gear_id"], name)
+            ).fetchone()
+        else:
+            ok = c.execute(
+                """SELECT 1 FROM gear_photos p JOIN set_items si ON si.gear_id=p.gear_id
+                WHERE si.set_id=? AND p.filename=?""",
+                (share["set_id"], name),
+            ).fetchone()
+    path = photo_path(name)
+    if not ok or not path.exists():
+        raise HTTPException(404, "Not found", headers=SHARE_HEADERS)
+    return FileResponse(path, headers=SHARE_HEADERS)
+
+
+@app.get("/robots.txt", include_in_schema=False)
+def robots():
+    return PlainTextResponse("User-agent: *\nDisallow: /\n")
+
+
+def register_share_routes(prefix: str, auth, v1: bool) -> None:
+    extra: dict[str, Any] = {"tags": ["v1"]} if v1 else {"include_in_schema": False}
+    tag = "v1_" if v1 else ""
+    for kind, path, noun in (("gear", "/gear/{item_id}/share", "a piece of gear"), ("set", "/sets/{item_id}/share", "a set")):
+
+        def make(kind=kind, path=path, noun=noun):
+            @app.get(prefix + path, name=f"{tag}get_{kind}_share", summary=f"Get the share link for {noun}", **extra)
+            def _get(item_id: int, request: Request):
+                auth(request)
+                with db() as c:
+                    (get_gear_row if kind == "gear" else get_set_row)(c, item_id)
+                    return {"share": share_info(c, kind, item_id)}
+
+            @app.post(
+                prefix + path, name=f"{tag}post_{kind}_share",
+                summary=f"Create a read-only public link for {noun}. Returns the existing link unless "
+                "regenerate is true; expires_in_days sets or changes the expiry",
+                **extra,
+            )
+            def _post(item_id: int, request: Request, body: ShareIn | None = None):
+                user = auth(request)
+                with db() as c:
+                    return {"share": create_share(c, kind, item_id, user["id"], body)}
+
+            @app.delete(prefix + path, name=f"{tag}delete_{kind}_share",
+                        summary=f"Turn off the share link for {noun} (the old URL stops working)", **extra)
+            def _delete(item_id: int, request: Request):
+                auth(request)
+                with db() as c:
+                    return revoke_share(c, kind, item_id)
+
+        make()
+
+
+# ---------------------------------------------------------------- songs
+# Per-song rig and tone settings: which guitar, amp and set, the knob settings on each piece
+# of gear in the chain, and patch pointers for modelers (multi-FX units).
+# Gear links keep a copy of the gear's name so a song still reads right after the gear is sold
+# or deleted. Knob values are always text ("2:00", "noon", "max", "Bright").
+
+MAX_KNOBS = 40
+MAX_RIG = 40
+MAX_PATCHES = 20
+MAX_BLOCKS = 40
+MAX_SCENES = 16
+ENGAGED = ("on", "off", "toggle")
+TUNING_SUGGESTIONS = ["E Std", "Eb", "D Std", "Drop D", "Drop C#", "Drop C", "DADGAD", "Open G", "Open D", "Open E"]
+
+
+class Knob(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    value: str = Field(default="", max_length=40)
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _text(cls, v):
+        # knob positions are text by design: "2:00", "noon", "max", "7.5"
+        return "" if v is None else str(v)
+
+
+class RigSettingIn(BaseModel):
+    gear_id: int | None = None
+    gear_name: str | None = Field(default=None, max_length=80)
+    position: int | None = Field(default=None, ge=0, le=1000)
+    engaged: Literal["on", "off", "toggle"] = "on"
+    knobs: list[Knob] = Field(default_factory=list, max_length=MAX_KNOBS)
+    note: str = Field(default="", max_length=1000)
+
+
+class RigSettingPatch(BaseModel):
+    gear_id: int | None = None
+    gear_name: str | None = Field(default=None, max_length=80)
+    position: int | None = Field(default=None, ge=0, le=1000)
+    engaged: Literal["on", "off", "toggle"] | None = None
+    knobs: list[Knob] | None = Field(default=None, max_length=MAX_KNOBS)
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class EffectBlockIn(BaseModel):
+    slot: str = Field(default="", max_length=20)
+    block_type: str = Field(default="", max_length=40)
+    model: str = Field(default="", max_length=80)
+    enabled: bool = True
+    params: list[Knob] = Field(default_factory=list, max_length=MAX_KNOBS)
+    scene_overrides: dict[str, Any] | None = None
+
+
+class PatchIn(BaseModel):
+    gear_id: int | None = None
+    gear_name: str | None = Field(default=None, max_length=80)
+    position: int | None = Field(default=None, ge=0, le=1000)
+    patch_ref: str = Field(default="", max_length=40)
+    patch_name: str = Field(default="", max_length=80)
+    scenes: list[str] = Field(default_factory=list, max_length=MAX_SCENES)
+    midi: dict[str, Any] | None = None
+    note: str = Field(default="", max_length=1000)
+    blocks: list[EffectBlockIn] | None = Field(default=None, max_length=MAX_BLOCKS)
+
+
+class PatchPatch(BaseModel):
+    gear_id: int | None = None
+    gear_name: str | None = Field(default=None, max_length=80)
+    position: int | None = Field(default=None, ge=0, le=1000)
+    patch_ref: str | None = Field(default=None, max_length=40)
+    patch_name: str | None = Field(default=None, max_length=80)
+    scenes: list[str] | None = Field(default=None, max_length=MAX_SCENES)
+    midi: dict[str, Any] | None = None
+    note: str | None = Field(default=None, max_length=1000)
+    blocks: list[EffectBlockIn] | None = Field(default=None, max_length=MAX_BLOCKS)
+
+
+class SongIn(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    artist: str = Field(default="", max_length=120)
+    tuning: str = Field(default="", max_length=40)
+    capo: int | None = Field(default=None, ge=0, le=24)
+    key: str = Field(default="", max_length=20)
+    bpm: int | None = Field(default=None, ge=1, le=400)
+    guitar_id: int | None = None
+    amp_id: int | None = None
+    set_id: int | None = None
+    notes: str = Field(default="", max_length=4000)
+    rig: list[RigSettingIn] | None = Field(default=None, max_length=MAX_RIG)
+    patches: list[PatchIn] | None = Field(default=None, max_length=MAX_PATCHES)
+
+
+class SongPatch(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    artist: str | None = Field(default=None, max_length=120)
+    tuning: str | None = Field(default=None, max_length=40)
+    capo: int | None = Field(default=None, ge=0, le=24)
+    key: str | None = Field(default=None, max_length=20)
+    bpm: int | None = Field(default=None, ge=1, le=400)
+    guitar_id: int | None = None
+    amp_id: int | None = None
+    set_id: int | None = None
+    notes: str | None = Field(default=None, max_length=4000)
+    rig: list[RigSettingIn] | None = Field(default=None, max_length=MAX_RIG)
+    patches: list[PatchIn] | None = Field(default=None, max_length=MAX_PATCHES)
+
+
+def knobs_json(knobs: list[Knob] | None) -> str:
+    return json.dumps([{"name": k.name.strip(), "value": k.value.strip()} for k in (knobs or []) if k.name.strip()])
+
+
+def gear_link(c, gear_id: int | None, want_type: str | None = None, name: str | None = None) -> tuple[int | None, str]:
+    """Resolve a gear link to (id, copied name). A missing id keeps just the typed name."""
+    if gear_id is None:
+        return None, (name or "").strip()
+    row = c.execute("SELECT id, type, name FROM gear WHERE id=?", (gear_id,)).fetchone()
+    if not row:
+        raise HTTPException(400, f"Gear {gear_id} not found")
+    if want_type and row["type"] != want_type:
+        raise HTTPException(400, f"Gear {gear_id} is not a {want_type}")
+    return row["id"], row["name"]
+
+
+def get_song_row(c, song_id: int):
+    row = c.execute("SELECT * FROM songs WHERE id=?", (song_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Song not found")
+    return row
+
+
+def rig_dict(row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "gear_id": row["gear_id"],
+        "gear_name": row["gear_name"],
+        "position": row["position"],
+        "engaged": row["engaged"],
+        "knobs": json.loads(row["knobs"] or "[]"),
+        "note": row["note"],
+    }
+
+
+def block_dict(row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "position": row["position"],
+        "slot": row["slot"],
+        "block_type": row["block_type"],
+        "model": row["model"],
+        "enabled": bool(row["enabled"]),
+        "params": json.loads(row["params"] or "[]"),
+        "scene_overrides": json.loads(row["scene_overrides"]) if row["scene_overrides"] else None,
+    }
+
+
+def patch_dict(c, row) -> dict[str, Any]:
+    blocks = c.execute(
+        "SELECT * FROM song_effect_blocks WHERE patch_id=? ORDER BY position, id", (row["id"],)
+    ).fetchall()
+    return {
+        "id": row["id"],
+        "gear_id": row["gear_id"],
+        "gear_name": row["gear_name"],
+        "position": row["position"],
+        "patch_ref": row["patch_ref"],
+        "patch_name": row["patch_name"],
+        "scenes": json.loads(row["scenes"] or "[]"),
+        "midi": json.loads(row["midi"]) if row["midi"] else None,
+        "note": row["note"],
+        "blocks": [block_dict(b) for b in blocks],
+    }
+
+
+def song_photo_list(c, song_id: int) -> list[dict[str, Any]]:
+    rows = c.execute(
+        "SELECT id, filename FROM song_photos WHERE song_id=? ORDER BY sort, id", (song_id,)
+    ).fetchall()
+    return [{"id": r["id"], "url": f"/api/photos/{r['filename']}"} for r in rows]
+
+
+def song_summary(c, row) -> dict[str, Any]:
+    photos = song_photo_list(c, row["id"])
+    return {
+        "id": row["id"],
+        "title": row["title"],
+        "artist": row["artist"],
+        "tuning": row["tuning"],
+        "capo": row["capo"],
+        "key": row["song_key"],
+        "bpm": row["bpm"],
+        "guitar_id": row["guitar_id"],
+        "guitar_name": row["guitar_name"],
+        "amp_id": row["amp_id"],
+        "amp_name": row["amp_name"],
+        "set_id": row["set_id"],
+        "set_name": row["set_name"],
+        "notes": row["notes"],
+        "cover": photos[0]["url"] if photos else None,
+        "added_by": display_user(c, row["created_by"]) or "System",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def song_dict(c, row) -> dict[str, Any]:
+    out = song_summary(c, row)
+    rig = c.execute(
+        "SELECT * FROM song_gear_settings WHERE song_id=? ORDER BY position, id", (row["id"],)
+    ).fetchall()
+    patches = c.execute(
+        "SELECT * FROM song_device_patches WHERE song_id=? ORDER BY position, id", (row["id"],)
+    ).fetchall()
+    out["rig"] = [rig_dict(r) for r in rig]
+    out["patches"] = [patch_dict(c, p) for p in patches]
+    out["photos"] = song_photo_list(c, row["id"])
+    return out
+
+
+def song_links(c, data: dict[str, Any]) -> dict[str, Any]:
+    """Turn guitar_id/amp_id/set_id in a payload into columns, with name copies."""
+    cols: dict[str, Any] = {}
+    if "guitar_id" in data:
+        cols["guitar_id"], name = gear_link(c, data["guitar_id"], "guitar")
+        if data["guitar_id"] is not None:
+            cols["guitar_name"] = name
+    if "amp_id" in data:
+        cols["amp_id"], name = gear_link(c, data["amp_id"], "amp")
+        if data["amp_id"] is not None:
+            cols["amp_name"] = name
+    if "set_id" in data:
+        if data["set_id"] is None:
+            cols["set_id"] = None
+        else:
+            row = get_set_row(c, data["set_id"])
+            cols["set_id"], cols["set_name"] = row["id"], row["name"]
+    return cols
+
+
+def insert_rig_setting(c, song_id: int, item: RigSettingIn, position: int) -> int:
+    gear_id, name = gear_link(c, item.gear_id, None, item.gear_name)
+    if not name:
+        raise HTTPException(400, "Each rig entry needs gear or a gear name")
+    return c.execute(
+        """INSERT INTO song_gear_settings(song_id,gear_id,gear_name,position,engaged,knobs,note)
+        VALUES(?,?,?,?,?,?,?)""",
+        (song_id, gear_id, name, item.position if item.position is not None else position,
+         item.engaged, knobs_json(item.knobs), item.note.strip()),
+    ).lastrowid
+
+
+def write_blocks(c, patch_id: int, blocks: list[EffectBlockIn]) -> None:
+    c.execute("DELETE FROM song_effect_blocks WHERE patch_id=?", (patch_id,))
+    for pos, b in enumerate(blocks):
+        c.execute(
+            """INSERT INTO song_effect_blocks(patch_id,position,slot,block_type,model,enabled,params,scene_overrides)
+            VALUES(?,?,?,?,?,?,?,?)""",
+            (patch_id, pos, b.slot.strip(), b.block_type.strip(), b.model.strip(), int(b.enabled),
+             knobs_json(b.params), json.dumps(b.scene_overrides) if b.scene_overrides else None),
+        )
+
+
+def clean_scenes(scenes: list[str] | None) -> str:
+    return json.dumps([str(s).strip()[:40] for s in (scenes or []) if str(s).strip()])
+
+
+def insert_patch(c, song_id: int, item: PatchIn, position: int) -> int:
+    gear_id, name = gear_link(c, item.gear_id, None, item.gear_name)
+    if not name:
+        raise HTTPException(400, "Each patch needs a device or a device name")
+    pid = c.execute(
+        """INSERT INTO song_device_patches(song_id,gear_id,gear_name,position,patch_ref,patch_name,scenes,midi,note)
+        VALUES(?,?,?,?,?,?,?,?,?)""",
+        (song_id, gear_id, name, item.position if item.position is not None else position,
+         item.patch_ref.strip(), item.patch_name.strip(), clean_scenes(item.scenes),
+         json.dumps(item.midi) if item.midi else None, item.note.strip()),
+    ).lastrowid
+    if item.blocks:
+        write_blocks(c, pid, item.blocks)
+    return pid
+
+
+def replace_rig(c, song_id: int, rig: list[RigSettingIn]) -> None:
+    c.execute("DELETE FROM song_gear_settings WHERE song_id=?", (song_id,))
+    for pos, item in enumerate(rig):
+        insert_rig_setting(c, song_id, item, pos)
+
+
+def replace_patches(c, song_id: int, patches: list[PatchIn]) -> None:
+    c.execute("DELETE FROM song_device_patches WHERE song_id=?", (song_id,))
+    for pos, item in enumerate(patches):
+        insert_patch(c, song_id, item, pos)
+
+
+def create_song(c, body: SongIn, user_id: int | None) -> int:
+    stamp = now_iso()
+    data = body.model_dump(exclude={"rig", "patches"})
+    links = song_links(c, {k: data[k] for k in ("guitar_id", "amp_id", "set_id")})
+    song_id = c.execute(
+        """INSERT INTO songs(title,artist,tuning,capo,song_key,bpm,guitar_id,guitar_name,amp_id,amp_name,
+           set_id,set_name,notes,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            body.title.strip(), body.artist.strip(), body.tuning.strip(), body.capo, body.key.strip(), body.bpm,
+            links.get("guitar_id"), links.get("guitar_name", ""), links.get("amp_id"), links.get("amp_name", ""),
+            links.get("set_id"), links.get("set_name", ""), body.notes.strip(), user_id, stamp, stamp,
+        ),
+    ).lastrowid
+    if body.rig:
+        replace_rig(c, song_id, body.rig)
+    if body.patches:
+        replace_patches(c, song_id, body.patches)
+    return song_id
+
+
+def update_song(c, row, body: SongPatch) -> None:
+    data = body.model_dump(exclude_unset=True)
+    rig = data.pop("rig", None)
+    patches = data.pop("patches", None)
+    cols = song_links(c, {k: data.pop(k) for k in ("guitar_id", "amp_id", "set_id") if k in data})
+    for key in ("title", "artist", "tuning", "key", "notes"):
+        if key in data:
+            if data[key] is None:
+                if key == "title":
+                    raise HTTPException(400, "Title is required")
+                data[key] = ""
+            cols["song_key" if key == "key" else key] = data.pop(key).strip()
+    for key in ("capo", "bpm"):
+        if key in data:
+            cols[key] = data.pop(key)
+    cols["updated_at"] = now_iso()
+    sql = ", ".join(f"{k}=?" for k in cols)
+    c.execute(f"UPDATE songs SET {sql} WHERE id=?", (*cols.values(), row["id"]))
+    if rig is not None:
+        replace_rig(c, row["id"], body.rig)
+    if patches is not None:
+        replace_patches(c, row["id"], body.patches)
+
+
+def touch_song(c, song_id: int) -> None:
+    c.execute("UPDATE songs SET updated_at=? WHERE id=?", (now_iso(), song_id))
+
+
+def list_song_rows(c, q: str | None = None, gear_id: int | None = None) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM songs"
+    where, params = [], []
+    if q:
+        where.append("(title LIKE ? OR artist LIKE ?)")
+        params += [f"%{q}%", f"%{q}%"]
+    if gear_id is not None:
+        where.append(
+            """(guitar_id=? OR amp_id=? OR id IN (SELECT song_id FROM song_gear_settings WHERE gear_id=?)
+            OR id IN (SELECT song_id FROM song_device_patches WHERE gear_id=?))"""
+        )
+        params += [gear_id] * 4
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY title COLLATE NOCASE, artist COLLATE NOCASE"
+    return [song_summary(c, r) for r in c.execute(sql, params)]
+
+
+def remove_song(c, song_id: int) -> dict[str, Any]:
+    get_song_row(c, song_id)
+    for p in song_photo_list(c, song_id):
+        unlink_photo(p["url"].rsplit("/", 1)[-1])
+    c.execute("DELETE FROM songs WHERE id=?", (song_id,))
+    return {"ok": True}
+
+
+def rig_row(c, song_id: int, setting_id: int):
+    row = c.execute(
+        "SELECT * FROM song_gear_settings WHERE id=? AND song_id=?", (setting_id, song_id)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Rig entry not found")
+    return row
+
+
+def patch_row(c, song_id: int, patch_id: int):
+    row = c.execute(
+        "SELECT * FROM song_device_patches WHERE id=? AND song_id=?", (patch_id, song_id)
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, "Patch not found")
+    return row
+
+
+def add_rig_setting(c, song_id: int, body: RigSettingIn) -> dict[str, Any]:
+    get_song_row(c, song_id)
+    top = c.execute(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM song_gear_settings WHERE song_id=?", (song_id,)
+    ).fetchone()[0]
+    sid = insert_rig_setting(c, song_id, body, top)
+    touch_song(c, song_id)
+    return rig_dict(c.execute("SELECT * FROM song_gear_settings WHERE id=?", (sid,)).fetchone())
+
+
+def edit_rig_setting(c, song_id: int, setting_id: int, body: RigSettingPatch) -> dict[str, Any]:
+    row = rig_row(c, song_id, setting_id)
+    data = body.model_dump(exclude_unset=True)
+    cols: dict[str, Any] = {}
+    if "gear_id" in data or "gear_name" in data:
+        gid, name = gear_link(c, data.get("gear_id", row["gear_id"]), None, data.get("gear_name") or row["gear_name"])
+        cols["gear_id"], cols["gear_name"] = gid, name or row["gear_name"]
+    if data.get("position") is not None:
+        cols["position"] = data["position"]
+    if data.get("engaged") is not None:
+        cols["engaged"] = data["engaged"]
+    if data.get("knobs") is not None:
+        cols["knobs"] = knobs_json(body.knobs)
+    if data.get("note") is not None:
+        cols["note"] = data["note"].strip()
+    if cols:
+        sql = ", ".join(f"{k}=?" for k in cols)
+        c.execute(f"UPDATE song_gear_settings SET {sql} WHERE id=?", (*cols.values(), setting_id))
+        touch_song(c, song_id)
+    return rig_dict(c.execute("SELECT * FROM song_gear_settings WHERE id=?", (setting_id,)).fetchone())
+
+
+def delete_rig_setting(c, song_id: int, setting_id: int) -> dict[str, Any]:
+    rig_row(c, song_id, setting_id)
+    c.execute("DELETE FROM song_gear_settings WHERE id=?", (setting_id,))
+    touch_song(c, song_id)
+    return {"ok": True}
+
+
+def add_patch(c, song_id: int, body: PatchIn) -> dict[str, Any]:
+    get_song_row(c, song_id)
+    top = c.execute(
+        "SELECT COALESCE(MAX(position), -1) + 1 FROM song_device_patches WHERE song_id=?", (song_id,)
+    ).fetchone()[0]
+    pid = insert_patch(c, song_id, body, top)
+    touch_song(c, song_id)
+    return patch_dict(c, c.execute("SELECT * FROM song_device_patches WHERE id=?", (pid,)).fetchone())
+
+
+def edit_patch(c, song_id: int, patch_id: int, body: PatchPatch) -> dict[str, Any]:
+    row = patch_row(c, song_id, patch_id)
+    data = body.model_dump(exclude_unset=True)
+    cols: dict[str, Any] = {}
+    if "gear_id" in data or "gear_name" in data:
+        gid, name = gear_link(c, data.get("gear_id", row["gear_id"]), None, data.get("gear_name") or row["gear_name"])
+        cols["gear_id"], cols["gear_name"] = gid, name or row["gear_name"]
+    for key in ("patch_ref", "patch_name", "note"):
+        if data.get(key) is not None:
+            cols[key] = data[key].strip()
+    if data.get("position") is not None:
+        cols["position"] = data["position"]
+    if data.get("scenes") is not None:
+        cols["scenes"] = clean_scenes(data["scenes"])
+    if "midi" in data:
+        cols["midi"] = json.dumps(data["midi"]) if data["midi"] else None
+    if cols:
+        sql = ", ".join(f"{k}=?" for k in cols)
+        c.execute(f"UPDATE song_device_patches SET {sql} WHERE id=?", (*cols.values(), patch_id))
+    if body.blocks is not None:
+        write_blocks(c, patch_id, body.blocks)
+    touch_song(c, song_id)
+    return patch_dict(c, c.execute("SELECT * FROM song_device_patches WHERE id=?", (patch_id,)).fetchone())
+
+
+def delete_patch(c, song_id: int, patch_id: int) -> dict[str, Any]:
+    patch_row(c, song_id, patch_id)
+    c.execute("DELETE FROM song_device_patches WHERE id=?", (patch_id,))
+    touch_song(c, song_id)
+    return {"ok": True}
+
+
+async def attach_song_photo(c, song_id: int, file: UploadFile) -> dict[str, Any]:
+    get_song_row(c, song_id)
+    stored = await save_photo(file)
+    top = c.execute(
+        "SELECT COALESCE(MAX(sort), -1) + 1 FROM song_photos WHERE song_id=?", (song_id,)
+    ).fetchone()[0]
+    pid = c.execute(
+        "INSERT INTO song_photos(song_id,filename,sort,created_at) VALUES(?,?,?,?)",
+        (song_id, stored, top, now_iso()),
+    ).lastrowid
+    touch_song(c, song_id)
+    return {"id": pid, "url": f"/api/photos/{stored}"}
+
+
+def song_photo_row(c, photo_id: int):
+    row = c.execute("SELECT * FROM song_photos WHERE id=?", (photo_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Photo not found")
+    return row
+
+
+def remove_song_photo(c, photo_id: int) -> dict[str, Any]:
+    row = song_photo_row(c, photo_id)
+    unlink_photo(row["filename"])
+    c.execute("DELETE FROM song_photos WHERE id=?", (photo_id,))
+    touch_song(c, row["song_id"])
+    return {"ok": True}
+
+
+def set_song_cover(c, photo_id: int) -> dict[str, Any]:
+    row = song_photo_row(c, photo_id)
+    c.execute("UPDATE song_photos SET sort=sort+1 WHERE song_id=?", (row["song_id"],))
+    c.execute("UPDATE song_photos SET sort=0 WHERE id=?", (photo_id,))
+    touch_song(c, row["song_id"])
+    return {"ok": True}
+
+
+def session_user(request: Request) -> sqlite3.Row:
+    return current_user(request)
+
+
+def token_user(request: Request) -> sqlite3.Row:
+    return token_auth(request)[1]
+
+
+def register_song_routes(prefix: str, auth, v1: bool) -> None:
+    """The same song routes for the web app (session cookie) and the token API (/api/v1)."""
+    extra: dict[str, Any] = {"tags": ["v1"]} if v1 else {"include_in_schema": False}
+    tag = "v1_" if v1 else ""
+
+    def route(method: str, path: str, summary: str, **kw):
+        return getattr(app, method)(prefix + path, summary=summary, name=f"{tag}{method}_{path}", **extra, **kw)
+
+    @route("get", "/songs", "List songs (filter by title/artist with q, or by gear_id)")
+    def _list(request: Request, q: str | None = None, gear_id: int | None = None):
+        auth(request)
+        with db() as c:
+            return list_song_rows(c, q, gear_id)
+
+    @route("post", "/songs", "Add a song, optionally with its rig settings and device patches", status_code=201)
+    def _add(body: SongIn, request: Request):
+        user = auth(request)
+        with db() as c:
+            return song_dict(c, get_song_row(c, create_song(c, body, user["id"])))
+
+    @route("get", "/songs/{song_id}", "Get one song with its full rig, patches and photos")
+    def _get(song_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            return song_dict(c, get_song_row(c, song_id))
+
+    @route("patch", "/songs/{song_id}",
+           "Update a song. Sending rig or patches replaces that whole list; leave them out to keep them")
+    def _patch(song_id: int, body: SongPatch, request: Request):
+        auth(request)
+        with db() as c:
+            update_song(c, get_song_row(c, song_id), body)
+            return song_dict(c, get_song_row(c, song_id))
+
+    @route("delete", "/songs/{song_id}", "Delete a song (the gear stays)")
+    def _delete(song_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            return remove_song(c, song_id)
+
+    @route("post", "/songs/{song_id}/rig", "Add one piece of gear with its settings to a song's rig",
+           status_code=201)
+    def _rig_add(song_id: int, body: RigSettingIn, request: Request):
+        auth(request)
+        with db() as c:
+            return add_rig_setting(c, song_id, body)
+
+    @route("patch", "/songs/{song_id}/rig/{setting_id}", "Change one rig entry's knobs, on/off state, order or note")
+    def _rig_edit(song_id: int, setting_id: int, body: RigSettingPatch, request: Request):
+        auth(request)
+        with db() as c:
+            return edit_rig_setting(c, song_id, setting_id, body)
+
+    @route("delete", "/songs/{song_id}/rig/{setting_id}", "Remove one piece of gear from a song's rig")
+    def _rig_delete(song_id: int, setting_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            return delete_rig_setting(c, song_id, setting_id)
+
+    @route("post", "/songs/{song_id}/patches", "Add a modeler patch pointer to a song", status_code=201)
+    def _patch_add(song_id: int, body: PatchIn, request: Request):
+        auth(request)
+        with db() as c:
+            return add_patch(c, song_id, body)
+
+    @route("patch", "/songs/{song_id}/patches/{patch_id}",
+           "Change a patch pointer (sending blocks replaces its effect blocks)")
+    def _patch_edit(song_id: int, patch_id: int, body: PatchPatch, request: Request):
+        auth(request)
+        with db() as c:
+            return edit_patch(c, song_id, patch_id, body)
+
+    @route("delete", "/songs/{song_id}/patches/{patch_id}", "Remove a patch pointer from a song")
+    def _patch_delete(song_id: int, patch_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            return delete_patch(c, song_id, patch_id)
+
+    @route("post", "/songs/{song_id}/photos", "Attach a photo to a song (multipart field \"photo\")",
+           status_code=201)
+    async def _photo_add(song_id: int, request: Request, photo: UploadFile = File(...)):
+        auth(request)
+        with db() as c:
+            return await attach_song_photo(c, song_id, photo)
+
+    @route("delete", "/song-photos/{photo_id}", "Delete a song photo")
+    def _photo_delete(photo_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            return remove_song_photo(c, photo_id)
+
+    @route("post", "/song-photos/{photo_id}/cover", "Make a song photo the cover")
+    def _photo_cover(photo_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            return set_song_cover(c, photo_id)
+
+
+register_song_routes("/api", session_user, v1=False)
+register_song_routes("/api/v1", token_user, v1=True)
+register_share_routes("/api", session_user, v1=False)
+register_share_routes("/api/v1", token_user, v1=True)
+
+
+@app.get("/api/song-options")
+def song_options(request: Request):
+    """Tuning suggestions for the song editor."""
+    current_user(request)
+    return {"tunings": TUNING_SUGGESTIONS}
+
+
 # ---------------------------------------------------------------- settings
 
 SETTINGS_DEFAULTS = {
@@ -1253,6 +2288,9 @@ class SettingsIn(BaseModel):
     feature_picks: bool | None = None
     feature_sets: bool | None = None
     feature_maintenance: bool | None = None
+    feature_songs: bool | None = None
+    feature_want: bool | None = None
+    feature_sold: bool | None = None
 
 
 @app.get("/api/settings")
@@ -1408,19 +2446,12 @@ def revoke_token(item_id: int, request: Request):
 # and acts as the user who created the token. Interactive docs live at /api/docs.
 
 
-@app.get("/api/v1/gear", tags=["v1"], summary="List gear, optionally filtered by type")
-def v1_list_gear(request: Request, type: str | None = None):
+@app.get("/api/v1/gear", tags=["v1"],
+         summary="List gear, optionally filtered by type and lifecycle (owned, want, sold)")
+def v1_list_gear(request: Request, type: str | None = None, lifecycle: str | None = None):
     token_auth(request)
     with db() as c:
-        sql = "SELECT * FROM gear"
-        params: tuple = ()
-        if type:
-            if type not in GEAR_TYPES:
-                raise HTTPException(400, "Unknown gear type")
-            sql += " WHERE type=?"
-            params = (type,)
-        sql += " ORDER BY type, favorite DESC, name COLLATE NOCASE"
-        return [gear_dict(c, r) for r in c.execute(sql, params)]
+        return list_gear_rows(c, type, lifecycle)
 
 
 @app.post("/api/v1/gear", tags=["v1"], status_code=201, summary="Add a piece of gear")
@@ -1672,7 +2703,7 @@ def mark_announced(c, key: str, items: list[dict[str, Any]], now: datetime) -> N
     state = json.loads(get_setting(c, key, "{}") or "{}")
     for item in items:
         state[str(item["gear_id"])] = {"due": item["due_date"], "sent": now.date().isoformat()}
-    live = {str(r[0]) for r in c.execute("SELECT id FROM gear WHERE type='guitar'")}
+    live = {str(r[0]) for r in c.execute("SELECT id FROM gear WHERE type='guitar' AND lifecycle='owned'")}
     state = {k: v for k, v in state.items() if k in live}
     set_setting(c, key, json.dumps(state))
 

@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import subprocess
@@ -1061,7 +1062,10 @@ def test_setlist_builder_shows_presets_per_song(app_url, width, height):
         # reorder with the arrows and remove
         page.get_by_role("button", name="Move Opener up").click()
         expect(titles).to_have_text(["Opener", "Heavy One", "Closer"])
-        page.get_by_role("button", name="Remove Closer").click()
+        with page.expect_response(lambda r: "/api/setlists/" in r.url and r.request.method == "PATCH"
+                                  and len(json.loads(r.request.post_data or "{}").get("songs", [])) == 2) as saved:
+            page.get_by_role("button", name="Remove Closer").click()
+        assert saved.value.ok
         expect(titles).to_have_text(["Opener", "Heavy One"])
         page.reload()
         expect(titles).to_have_text(["Opener", "Heavy One"])

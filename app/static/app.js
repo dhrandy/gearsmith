@@ -979,15 +979,27 @@ function songCard(s) {
       </a>`;
 }
 
+// "Treaty Oak (Ampero Mini)" -> title "Treaty Oak", rig "Ampero Mini"
+function splitRig(name) {
+  const m = /^(.*\S)\s*\(([^()]+)\)\s*$/.exec(name || "");
+  return m ? { title: m[1], rig: m[2] } : { title: name, rig: "" };
+}
+
 function presetCard(p) {
   const used = p.song_count === 0 ? "Not used yet" : p.song_count === 1 ? "Used in 1 song" : `Used in ${p.song_count} songs`;
+  const { title, rig } = splitRig(p.name);
+  const chain = [...(p.chain_summary || [])];
+  if (p.amp_name && !chain.includes(p.amp_name)) chain.push(p.amp_name);
+  const chainText = chain.join(" › ");
   return `
-      <a class="gear-card song-card preset-card" href="#/presets/${p.id}">
+      <a class="gear-card song-card preset-card" href="#/presets/${p.id}" title="${esc(p.name)}">
         <span class="thumb">🎚️</span>
         <span class="gc-body">
-          <span class="gc-name" title="${esc(p.name)}">${esc(p.name)}</span>
-          <span class="gc-meta" title="${esc(p.artist)}">${esc(p.artist) || "&nbsp;"}</span>
-          <span class="gc-foot">${p.amp_name ? `<span class="badge">🔊 ${esc(p.amp_name)}</span>` : ""}<span class="chip">${used}</span></span>
+          <span class="gc-name">${esc(title)}</span>
+          ${p.artist ? `<span class="gc-meta">${esc(p.artist)}</span>` : ""}
+          ${rig ? `<span class="rig-tag">${esc(rig)}</span>` : ""}
+          ${chainText ? `<span class="chain-line" title="${esc(chainText)}">${esc(chainText)}</span>` : ""}
+          <span class="gc-foot"><span class="chip">${used}</span></span>
         </span>
       </a>`;
 }

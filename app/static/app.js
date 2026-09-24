@@ -345,6 +345,7 @@ async function gearListView(lifecycle = "owned") {
     if (gear.length && onlyFavs && !gear.some((g) => g.favorite)) empty = "No favorites yet. Tap the star on any card to add one.";
     else if (gear.length) empty = "Nothing matches.";
     container.innerHTML = html || `<p class="empty">${esc(empty)}</p>`;
+    rememberGearOrder(lifecycle, [...container.querySelectorAll(".gear-card")].map((a) => Number(a.getAttribute("href").split("/").pop())));
   }
   render();
   search.addEventListener("input", render);
@@ -374,6 +375,74 @@ async function gearListView(lifecycle = "owned") {
   const addBtn = document.getElementById("add-gear");
   if (addBtn) addBtn.addEventListener("click", () => gearForm(null, lifecycle));
 }
+
+/* ---------------------------------------------------------------- previous / next */
+
+// The gear page's previous/next buttons walk the same list the Gear page showed last,
+// filters included. Opened from somewhere else (a set, a song, a bookmark), they fall
+// back to the full list for that item's section: Owned, Want or Sold.
+const GEAR_ORDER_KEY = "gearsmith.gearOrder";
+
+function rememberGearOrder(lifecycle, ids) {
+  try { sessionStorage.setItem(GEAR_ORDER_KEY, JSON.stringify({ lifecycle, ids })); } catch { /* private mode: fall back to the full list */ }
+}
+
+function recalledGearOrder() {
+  try { return JSON.parse(sessionStorage.getItem(GEAR_ORDER_KEY)) || null; } catch { return null; }
+}
+
+function fullGearOrder(gear) {
+  return TYPE_ORDER.filter((t) => featureOn(FEATURE_FOR_TYPE[t]))
+    .flatMap((t) => gear.filter((g) => g.type === t).sort(byFavoriteThenName))
+    .map((g) => g.id);
+}
+
+async function gearNeighbors(g) {
+  const lifecycle = g.lifecycle || "owned";
+  const gear = await api(`/api/gear?lifecycle=${lifecycle}`);
+  const byId = new Map(gear.map((x) => [x.id, x]));
+  const saved = recalledGearOrder();
+  let ids = saved && saved.lifecycle === lifecycle && Array.isArray(saved.ids) && saved.ids.includes(g.id)
+    ? saved.ids.filter((id) => byId.has(id))
+    : fullGearOrder(gear);
+  if (!ids.includes(g.id)) ids = fullGearOrder(gear);
+  const at = ids.indexOf(g.id);
+  if (at < 0 || ids.length < 2) return null;
+  return {
+    prev: at > 0 ? byId.get(ids[at - 1]) : null,
+    next: at < ids.length - 1 ? byId.get(ids[at + 1]) : null,
+    position: at + 1,
+    total: ids.length,
+  };
+}
+
+function pagerHtml(nav) {
+  const side = (item, dir) => {
+    const arrow = dir === "prev" ? "‹" : "›";
+    const word = dir === "prev" ? "Previous" : "Next";
+    if (!item) return `<span class="pager-link ${dir} off" aria-hidden="true"><span class="pager-arrow">${arrow}</span></span>`;
+    return `<a class="pager-link ${dir}" id="gd-${dir}" href="#/gear/${item.id}" rel="${dir}" aria-label="${word}: ${esc(item.name)}" title="${word}: ${esc(item.name)}">
+      ${dir === "prev" ? `<span class="pager-arrow" aria-hidden="true">${arrow}</span>` : ""}<span class="pager-name">${esc(item.name)}</span>${dir === "next" ? `<span class="pager-arrow" aria-hidden="true">${arrow}</span>` : ""}</a>`;
+  };
+  return `${side(nav.prev, "prev")}<span class="pager-count">${nav.position} of ${nav.total}</span>${side(nav.next, "next")}`;
+}
+
+// The open gear page's neighbors, so a quick arrow key press still works while the row is loading.
+let pendingNav = null;
+
+// Left and right arrow keys step through gear while a gear page is open and nothing else has the keyboard.
+document.addEventListener("keydown", async (e) => {
+  if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || !modalEl.hidden) return;
+  if (e.target.closest && e.target.closest("input, select, textarea, [contenteditable]")) return;
+  const from = location.hash;
+  if (!pendingNav || from !== `#/gear/${pendingNav.id}`) return;
+  const nav = await pendingNav.promise.catch(() => null);
+  const item = nav && (e.key === "ArrowLeft" ? nav.prev : nav.next);
+  if (!item || location.hash !== from) return;
+  window.scrollTo(0, 0);
+  location.hash = `#/gear/${item.id}`;
+});
 
 /* ---------------------------------------------------------------- gear form */
 
@@ -553,6 +622,7 @@ async function gearDetailView(id) {
   ].filter(([, v]) => v !== "" && v !== null && v !== undefined);
   const specs = (g.spec_fields || []).filter((f) => f.value !== null && f.value !== undefined && f.value !== "");
   view.innerHTML = `
+    <nav class="pager" id="gd-pager" aria-label="Browse gear"></nav>
     <div class="pagehead">
       <h1>${esc(g.name)}</h1>
       <div class="row">
@@ -656,6 +726,14 @@ async function gearDetailView(id) {
         ${g.sets.map((s) => `<a class="set-chip link-chip" href="#/sets/${s.id}" title="${esc(s.name)}">${esc(s.name)}</a>`).join("") || `<span class="muted">Not in any set.</span>`}
       </div>
     </div>` : ""}`;
+
+  const pager = document.getElementById("gd-pager");
+  pendingNav = { id: g.id, promise: gearNeighbors(g) };
+  pendingNav.promise.then((nav) => {
+    if (!pager.isConnected) return; // moved on before the list came back
+    if (nav) pager.innerHTML = pagerHtml(nav);
+    else pager.remove();
+  }).catch(() => pager.remove());
 
   const favWrap = document.getElementById("gd-fav-wrap");
   favWrap.addEventListener("click", async (e) => {
@@ -2258,6 +2336,46 @@ let tunerStream = null;
 let tunerCtx = null;
 let tunerFrame = 0;
 
+// Target notes per tuning, low string (6th) to high (1st), as MIDI note numbers with the name players use.
+const TUNINGS = [
+  ["chromatic", "Chromatic (any note)", []],
+  ["standard", "Standard (E A D G B E)", [[40, "E"], [45, "A"], [50, "D"], [55, "G"], [59, "B"], [64, "E"]]],
+  ["half-down", "Half step down (E\u266d)", [[39, "E\u266d"], [44, "A\u266d"], [49, "D\u266d"], [54, "G\u266d"], [58, "B\u266d"], [63, "E\u266d"]]],
+  ["d-standard", "Full step down (D standard)", [[38, "D"], [43, "G"], [48, "C"], [53, "F"], [57, "A"], [62, "D"]]],
+  ["drop-d", "Drop D", [[38, "D"], [45, "A"], [50, "D"], [55, "G"], [59, "B"], [64, "E"]]],
+  ["drop-c-sharp", "Drop C#", [[37, "C#"], [44, "G#"], [49, "C#"], [54, "F#"], [58, "A#"], [63, "D#"]]],
+  ["drop-c", "Drop C", [[36, "C"], [43, "G"], [48, "C"], [53, "F"], [57, "A"], [62, "D"]]],
+  ["drop-b", "Drop B", [[35, "B"], [42, "F#"], [47, "B"], [52, "E"], [56, "G#"], [61, "C#"]]],
+  ["open-g", "Open G", [[38, "D"], [43, "G"], [50, "D"], [55, "G"], [59, "B"], [62, "D"]]],
+  ["open-d", "Open D", [[38, "D"], [45, "A"], [50, "D"], [54, "F#"], [57, "A"], [62, "D"]]],
+  ["open-e", "Open E", [[40, "E"], [47, "B"], [52, "E"], [56, "G#"], [59, "B"], [64, "E"]]],
+  ["dadgad", "DADGAD", [[38, "D"], [45, "A"], [50, "D"], [55, "G"], [57, "A"], [62, "D"]]],
+];
+const TUNING_KEY = "gearsmith.tuning";
+
+function savedTuning() {
+  let key = "standard";
+  try { key = localStorage.getItem(TUNING_KEY) || key; } catch { /* private mode: standard */ }
+  return TUNINGS.some(([k]) => k === key) ? key : "standard";
+}
+
+function tuningStrings(key) {
+  const found = TUNINGS.find(([k]) => k === key);
+  return (found ? found[2] : []).map(([midi, name], i, all) => ({
+    midi, name, string: all.length - i, octave: Math.floor(midi / 12) - 1, hz: 440 * 2 ** ((midi - 69) / 12),
+  }));
+}
+
+// The string a detected pitch is most likely aimed at, and how far off it is in cents.
+function targetFor(freq, key) {
+  let best = null;
+  for (const s of tuningStrings(key)) {
+    const cents = 1200 * Math.log2(freq / s.hz);
+    if (!best || Math.abs(cents) < Math.abs(best.cents)) best = { ...s, cents: Math.round(cents) };
+  }
+  return best;
+}
+
 function stopTuner() {
   if (tunerFrame) cancelAnimationFrame(tunerFrame);
   tunerFrame = 0;
@@ -2316,10 +2434,17 @@ function noteFromFreq(freq) {
 
 function tunerView() {
   stopTuner();
+  let tuning = savedTuning();
   view.innerHTML = `
     <div class="pagehead"><h1>Tuner</h1></div>
-    <p class="muted">Chromatic tuner, A440. It runs fully in your browser - what the mic hears never leaves your device.</p>
+    <p class="muted">A440 tuner. It runs fully in your browser - what the mic hears never leaves your device.</p>
     <div class="card tuner-card">
+      <label class="tuner-pick">Tuning
+        <select id="tuner-tuning">
+          ${TUNINGS.map(([k, label]) => `<option value="${k}"${k === tuning ? " selected" : ""}>${esc(label)}</option>`).join("")}
+        </select>
+      </label>
+      <div class="tuner-strings" id="tuner-strings" aria-label="Target notes, low string to high"></div>
       <div class="tuner-note" id="tuner-note">--</div>
       <div class="tuner-freq muted" id="tuner-freq">&nbsp;</div>
       <div class="tuner-gauge" aria-hidden="true">
@@ -2334,6 +2459,23 @@ function tunerView() {
       </div>
       <p class="error" id="tuner-error"></p>
     </div>`;
+  const stringsEl = document.getElementById("tuner-strings");
+  function renderStrings(active = null) {
+    const list = tuningStrings(tuning);
+    stringsEl.hidden = !list.length;
+    stringsEl.innerHTML = list.map((t) => `
+      <span class="tuner-string${active && active.string === t.string ? (Math.abs(active.cents) <= 5 ? " on in-tune" : " on") : ""}" data-string="${t.string}">
+        <b>${esc(t.name)}<sub>${t.octave}</sub></b><small>${t.string}</small>
+      </span>`).join("");
+  }
+  renderStrings();
+  let lastActive = "";
+  document.getElementById("tuner-tuning").addEventListener("change", (e) => {
+    tuning = e.target.value;
+    try { localStorage.setItem(TUNING_KEY, tuning); } catch { /* private mode: just don't remember */ }
+    lastActive = "";
+    renderStrings();
+  });
   const btn = document.getElementById("tuner-toggle");
   btn.addEventListener("click", async () => {
     if (tunerStream) { stopTuner(); tunerView(); return; }
@@ -2371,12 +2513,22 @@ function tunerView() {
         centsEl.innerHTML = "&nbsp;";
         needle.style.left = "50%";
         needle.classList.remove("in-tune");
+        if (lastActive) { lastActive = ""; renderStrings(); }
       } else {
-        const t = noteFromFreq(freq);
+        // with a tuning picked, read against the nearest target string; chromatic reads the nearest note
+        const target = targetFor(freq, tuning);
+        const t = target
+          ? { name: target.name, octave: target.octave, cents: target.cents }
+          : noteFromFreq(freq);
         noteEl.textContent = t.name + t.octave;
-        freqEl.textContent = freq.toFixed(1) + " Hz";
+        freqEl.textContent = freq.toFixed(1) + " Hz" + (target ? ` · string ${target.string}` : "");
         const cents = Math.max(-50, Math.min(50, t.cents));
-        centsEl.textContent = (t.cents > 0 ? "+" : "") + t.cents + " cents";
+        const hint = target && Math.abs(t.cents) > 5 ? (t.cents < 0 ? " · tune up" : " · tune down") : "";
+        centsEl.textContent = (t.cents > 0 ? "+" : "") + t.cents + " cents" + hint;
+        if (target) {
+          const key = `${target.string}:${Math.abs(target.cents) <= 5}`;
+          if (key !== lastActive) { lastActive = key; renderStrings(target); }
+        }
         needle.style.left = `${50 + cents}%`;
         const inTune = Math.abs(t.cents) <= 5;
         noteEl.classList.toggle("in-tune", inTune);

@@ -226,12 +226,21 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent2); b
 .tuner-note { font-size: 72px; font-weight: 800; line-height: 1.1; min-height: 80px; }
 .tuner-note.in-tune { color: #9fd6ac; }
 .tuner-freq { font-size: 15px; min-height: 1.4em; }
-.tuner-gauge { position: relative; height: 46px; margin: 18px auto 6px; max-width: 420px; border-bottom: 2px solid var(--line); }
+.tuner-gauge { position: relative; height: 46px; margin: 18px auto 26px; max-width: 420px; border-bottom: 2px solid var(--line); }
 .tuner-tick { position: absolute; top: 100%; margin-top: 3px; font-size: 11px; color: var(--muted); }
 .tuner-tick.mid { left: 50%; transform: translateX(-50%); }
 .tuner-needle { position: absolute; top: 6px; bottom: 0; left: 50%; width: 3px; margin-left: -1.5px; border-radius: 2px; background: var(--accent); transition: left 0.08s linear; }
 .tuner-needle.in-tune { background: #9fd6ac; box-shadow: 0 0 10px rgba(76, 138, 91, 0.8); }
 .tuner-cents { min-height: 1.4em; margin-bottom: 14px; }
+.tuner-pick { display: inline-flex; align-items: center; gap: 10px; margin: 0 auto 14px; color: var(--muted); font-size: 14px; }
+.tuner-pick select { width: auto; max-width: 100%; }
+.tuner-strings { display: flex; justify-content: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.tuner-string { display: inline-flex; flex-direction: column; align-items: center; min-width: 46px; padding: 6px 4px; border: 1px solid var(--line); border-radius: 12px; }
+.tuner-string b { font-size: 18px; }
+.tuner-string sub { font-size: 11px; font-weight: 400; color: var(--muted); margin-left: 1px; }
+.tuner-string small { font-size: 11px; color: var(--muted); }
+.tuner-string.on { border-color: var(--accent); }
+.tuner-string.in-tune { border-color: #4c8a5b; background: rgba(76, 138, 91, 0.18); }
 
 /* owned / want / sold */
 .seg { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel); margin: 8px 0 4px; max-width: 100%; }
@@ -318,6 +327,20 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; min-hei
 .share .notes { overflow-wrap: anywhere; }
 .share-foot { color: var(--muted); font-size: 12px; margin-top: 28px; }
 
+/* gear page previous / next: a slim row above the title */
+.pager { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: center; gap: 10px; margin-top: 14px; min-height: 34px; font-size: 14px; }
+.pager:empty { visibility: hidden; }
+.pager + .pagehead h1 { margin-top: 6px; }
+.pager-link { display: inline-flex; align-items: center; gap: 6px; min-width: 0; max-width: 100%; min-height: 34px; padding: 4px 10px;
+  border: 1px solid var(--line); border-radius: 999px; color: var(--muted); text-decoration: none; }
+.pager-link:hover { color: inherit; border-color: #3d4a5e; }
+.pager-link.off { opacity: 0.35; border-style: dashed; }
+.pager-link.prev { justify-self: start; }
+.pager-link.next { justify-self: end; }
+.pager-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pager-arrow { font-size: 18px; line-height: 1; }
+.pager-count { color: var(--muted); white-space: nowrap; }
+
 /* ---------- phones: everything below is mobile only ---------- */
 @media (max-width: 650px) {
   .wrap { padding-left: max(14px, env(safe-area-inset-left)); padding-right: max(14px, env(safe-area-inset-right)); }
@@ -362,6 +385,15 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; min-hei
   .share-photos { grid-template-columns: minmax(0, 1fr); }
   .share-expiry { flex: 1 1 100%; }
   .sticky-actions { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
+  .tuner-pick { display: flex; flex-direction: column; align-items: stretch; gap: 6px; text-align: left; }
+  .tuner-pick select { width: 100%; }
+  .tuner-strings { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; }
+  .tuner-string { min-width: 0; }
+  .pager { margin-top: 10px; gap: 6px; }
+  .pager-link { width: 44px; min-height: 40px; justify-content: center; padding: 0; }
+  .pager-name { display: none; }
+  .pager-count { font-size: 13px; }
+  .pager + .pagehead h1 { margin-top: 4px; }
 }
 @media (max-width: 380px) {
   .tab { font-size: 14px; }

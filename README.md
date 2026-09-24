@@ -14,14 +14,19 @@
   - Strings: brand, gauge (10-46, 9-42...), type (electric, acoustic, classical, bass), material, strings per set, sets per pack
   - Photos on everything, purchase date and price, notes
 - **Strings on each guitar** - every guitar can pick the strings it uses from your Strings section, and each strings page lists the guitars using it. When you log a restring, pick the strings from a list and the brand and gauge fill in (or just type them). Deleting a strings item keeps the brand and gauge on old restring entries.
+- **String stock countdown** - a strings item can track how many unopened sets you have. Logging a restring with those strings takes one set off the count automatically; the card and page show the count and flag "1 set left" and "Out of sets". Adjust the count by hand on the strings page (or leave it untracked).
+- **Maintenance log** - every item keeps a service history: date, category (setup, tubes, fret work, repair, other) and a note. Add, edit and delete entries on the item's page.
+- **Manual links** - each item can carry a link to its manual, shown as a **Manual** button on the item's page. Links only; Gearsmith never stores the files.
+- **Built-in tuner** - a chromatic tuner (A440, note and cents) in its own tab. It runs fully in your browser with the Web Audio API - the mic signal never leaves your device, and the tab can be hidden in Settings > Features.
+- **Backup export** - Settings > Backup downloads the whole collection as one JSON file: gear, photos (stored names and links), sets, songs, presets, restrings, maintenance entries and string counts.
 - **Restring tracking** - log a restring (brand, gauge, date) and each guitar gets a "strings: N days" chip that turns yellow as the interval nears and red when it's overdue. Every guitar has its own restring interval.
 - **Favorites** - tap the star on any card or on the gear page to mark a favorite. Favorites sit at the top of their section, and the "Favorites only" button on the Gear page hides everything else (it remembers your choice on that device).
 - **Songs** - a recall sheet for every song you play: tuning, capo, key, BPM, the guitar and amp, and the knob settings on each pedal and amp in the chain (on, off, or toggled mid-song). Knob positions are free text, so "2:00", "noon", "max", and "7.5" all work. Multi-effects units and modelers (Helix, Quad Cortex, Kemper, and so on) get patch pointers instead: patch number and name, scenes, MIDI notes, and an optional list of effect blocks. Add photos of your board or a handwritten sheet. Each gear page lists the songs that use it.
 - **Presets** - save a tone once (the chain, knob settings, patches, and amp) under a name like "Classic crunch" or "Ambient clean", then use it in any song. Presets stay linked: change the preset and every song using it shows the new settings. A song can use several presets with labels ("Verse", "Solo"), plus its own settings on top. Turn a song's chain into a preset with **Save as preset**, or use **Copy into song** when one song needs its own tweaked version. Preset cards show the chain at a glance, and a rig in parentheses at the end of the name, like "Treaty Oak (Ampero Mini)", shows as a small tag under the title.
 - **Artists** - the Songs tab has an Artists view that groups your songs and presets by artist, so everything for one band sits together. Grouping ignores capitalization and extra spaces.
-- **Knob names per pedal** - give a pedal or amp its own control names (Gain, Tone, Level...) and the song editor fills them in for you. Mark a pedal as a modeler to track patches for it instead of knobs.
+- **Knob names per pedal** - give a pedal or amp its own control names (Gain, Tone, Level...) and the song editor fills them in for you. Each control can also keep your everyday setting ("Gain: 6"), shown on the item's page as a reference. Mark a pedal as a modeler to track patches for it instead of knobs.
 - **Want and Sold lists** - gear you're after (with a target price) and gear you've sold (with sale date and price) live in their own views next to what you own. Sold gear is dimmed and never shows up in the restring due list or notifications.
-- **Share links** - make a read-only link to one piece of gear or a whole set to send to a buyer, a tech, or a friend. Links use a random token, can expire (7, 30, or 90 days, or never), and can be turned off or replaced at any time. Shared pages hide serial numbers and prices, show no links back into your app, and tell search engines not to index them.
+- **Share links** - make a read-only link to one piece of gear or a whole set to send to a buyer, a tech, or a friend. Links use a random token, can expire (7, 30, or 90 days, or never), can show as a QR code for sharing in person, and can be turned off or replaced at any time. Shared pages hide serial numbers and prices, show no links back into your app, and tell search engines not to index them.
 - **Sets** - group gear into rigs: a pedalboard, a gig rig, a recording chain. Gear can live in several sets or none. Each set has its own page with its gear, notes and share link. Set names are links wherever they show up: on a gear page, on a song that uses the set, and in the Sets list.
 - **Notifications** - Apprise alerts (ntfy, Pushover, Telegram, and 100+ others) when a guitar's strings pass their interval, with quiet hours and overdue repeats.
 - **Search and filters** - the Gear page search matches names, makes, models, and spec values like a gauge, and a string-type filter narrows the Strings section. The API takes the same search as `?q=`.
@@ -100,12 +105,18 @@ Gear: list and add (GET/POST /api/v1/gear, filter the list with ?type=guitar, am
 or strings, ?lifecycle=owned, want or sold, and ?q= to search names and specs), read one item (GET /api/v1/gear/{id}), update it (PATCH /api/v1/gear/{id}). Every item
 has "favorite" (true/false) and "lifecycle" (owned, want or sold); want items can carry
 want_price, sold items sold_date and sold_price. Pedals and amps can list their knob names in
-specs.controls, and specs.modeler marks a multi-effects unit. Strings items (type "strings")
+specs.controls ([{name, kind, value?}], where value is your everyday setting), and
+specs.modeler marks a multi-effects unit. Strings items (type "strings")
 use make for the brand and specs gauge, string_type (electric, acoustic, classical or bass),
-material, strings_per_set and sets_per_pack. A guitar's strings_id points at the strings it uses.
+material, strings_per_set and sets_per_pack. A guitar's strings_id points at the strings it uses. Every item can carry manual_url (a link
+to its manual), and strings items can carry sets_on_hand (unopened sets in stock); logging a
+restring with strings_id takes one set off that count.
 Restrings: log one (POST /api/v1/gear/{id}/restrings with brand, gauge and optional date, or
 strings_id to fill brand and gauge from a strings item and switch the guitar to it) and
-check what's due (GET /api/v1/due). Sets: GET/POST /api/v1/sets.
+check what's due (GET /api/v1/due). Maintenance: list and log entries (GET/POST
+/api/v1/gear/{id}/maintenance with date, category - setup, tubes, fret work, repair or other -
+and note), edit or delete one (PATCH/DELETE /api/v1/maintenance/{entry_id}).
+Sets: GET/POST /api/v1/sets.
 Photos: attach one (POST /api/v1/gear/{id}/photos, multipart field "photo"), delete one
 (DELETE /api/v1/photos/{photo_id}), or make one the cover (POST /api/v1/photos/{photo_id}/cover).
 Songs: list, search and add (GET/POST /api/v1/songs, ?q= searches title and artist, ?gear_id=
@@ -130,6 +141,10 @@ describe a tone I use in several songs, save it as a preset and link those songs
 ```
 
 Treat tokens like passwords - anyone holding one can read and change your gear.
+
+## Backups
+
+Settings > Backup downloads everything as JSON (gear, photo references, sets, songs, presets, restrings, maintenance and stock counts). The photo files themselves live in your data volume, so back up `./data` for a complete copy.
 
 ## Development
 

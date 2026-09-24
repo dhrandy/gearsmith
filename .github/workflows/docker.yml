@@ -35,7 +35,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest
-            type=raw,value=v0.4.0
+            type=raw,value=v0.4.1
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.description=A simple self-hosted gear tracker for guitarists: inventory, restring tracking, and gear sets. Multi-user, one Docker container, SQLite storage - no subscriptions, no cloud account.

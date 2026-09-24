@@ -1,0 +1,13 @@
+{
+  "name": "Gearsmith",
+  "short_name": "Gearsmith",
+  "description": "A simple self-hosted gear tracker for guitarists.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    { "src": "/static/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

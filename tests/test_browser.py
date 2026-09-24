@@ -296,3 +296,172 @@ def test_star_toggle_floats_to_top_and_favorites_filter(app_url, width, height):
         expect(page.get_by_role("button", name="Add Starling to favorites")).to_be_visible()
         assert section_names(page, "Guitars") == ["Heron", "Starling"]
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_song_editor_prefills_knobs_and_recall_sheet(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.on("dialog", lambda d: d.accept())
+        sign_in(page, app_url)
+        req = page.request
+        gear = {g["name"]: g for g in req.get(app_url + "/api/gear").json()}
+        drive = gear["Demo Drive"]["id"]
+
+        # controls live on the gear page
+        page.goto(app_url + f"/#/gear/{drive}")
+        page.get_by_role("button", name="Edit controls").click()
+        page.locator("[data-ct-name='0']").fill("Gain")
+        for name in ("Tone", "Level"):
+            page.get_by_role("button", name="Add a control").click()
+            page.locator("[data-ct-name]").last.fill(name)
+        page.get_by_role("button", name="Save controls").click()
+        expect(page.locator("#gd-controls .set-chip")).to_have_count(3)
+        page.locator("#gd-modeler").check()
+        page.wait_for_timeout(300)
+        assert req.get(app_url + f"/api/gear/{drive}").json()["modeler"] is True
+
+        # new song: pick the drive, knob names come prefilled, type values only
+        page.get_by_role("link", name="Songs", exact=True).click()
+        page.get_by_role("link", name="Add song").click()
+        page.locator("#sg-title").fill("Test Song")
+        page.locator("#sg-artist").fill("Test Band")
+        page.locator("#sg-tuning").fill("Drop D")
+        page.locator("#sg-capo").fill("2")
+        page.locator("#sg-guitar").select_option(label="Starling")
+        expect(page.locator(".rig-row")).to_have_count(1)
+        page.locator("#rig-pick").select_option(label="Demo Drive")
+        names = page.locator("[data-r-kname^='1:']")
+        expect(names).to_have_count(3)
+        assert [names.nth(i).input_value() for i in range(3)] == ["Gain", "Tone", "Level"]
+        page.locator("[data-r-kval='1:0']").fill("2:00")
+        page.locator("[data-r-kval='1:1']").fill("noon")
+        page.locator("[data-r-kval='1:2']").fill("max")
+        page.locator("[data-rig-eng='1:toggle']").click()
+        page.locator("[data-rig-up='1']").click()  # drive first, then the guitar
+        page.locator("#patch-pick").select_option(label="Demo Drive")
+        page.locator("#p-ref-0").fill("12B")
+        page.locator("#p-scenes-0").fill("verse, solo")
+        assert_no_overflow(page, "song editor")
+        page.get_by_role("button", name="Add song").click()
+
+        # recall sheet: chain in order with the settings
+        expect(page.get_by_role("heading", name="Test Song")).to_be_visible()
+        chain = page.locator(".chain-item")
+        expect(chain).to_have_count(2)
+        expect(chain.nth(0)).to_contain_text("Demo Drive")
+        expect(chain.nth(0)).to_contain_text("2:00")
+        expect(chain.nth(0)).to_contain_text("noon")
+        expect(chain.nth(0).locator(".engaged")).to_have_text("Toggle")
+        expect(chain.nth(1)).to_contain_text("Starling")
+        expect(page.locator(".patch-ref")).to_have_text("12B")
+        expect(page.locator(".patch-card .chip")).to_have_count(2)
+        expect(page.locator(".chips").first).to_contain_text("Capo 2")
+        assert_no_overflow(page, "song recall sheet")
+
+        # edit round trip keeps everything, list shows the song
+        page.get_by_role("link", name="Edit", exact=True).click()
+        expect(page.locator("[data-r-kval='0:0']")).to_have_value("2:00")
+        page.locator("#sg-bpm").fill("96")
+        page.get_by_role("button", name="Save song").click()
+        expect(page.locator(".chips").first).to_contain_text("96 bpm")
+        page.get_by_role("link", name="Songs", exact=True).click()
+        expect(page.locator(".song-card", has_text="Test Song")).to_be_visible()
+        assert_no_overflow(page, "songs list")
+
+        # the gear page lists the song
+        page.goto(app_url + f"/#/gear/{drive}")
+        expect(page.locator("#gd-songs")).to_contain_text("Test Song")
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_want_and_sold_views(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        # add a wanted guitar from the Want view
+        page.locator(".seg").get_by_role("link", name="Want").click()
+        page.get_by_role("button", name="Add to want list").click()
+        expect(page.locator("#gf-life")).to_have_value("want")
+        page.locator("#gf-name").fill("Dream Guitar")
+        page.locator("#gf-wprice").fill("1500")
+        page.get_by_role("button", name="Add gear", exact=True).click()
+        expect(page.locator(".life-banner.want")).to_contain_text("$1,500")
+        page.goto(app_url + "/#/want")
+        expect(page.locator(".gear-card", has_text="Dream Guitar")).to_contain_text("Want · $1,500")
+        page.goto(app_url + "/#/")
+        expect(page.locator(".gear-card", has_text="Dream Guitar")).to_have_count(0)
+
+        # sell Starling through the edit form: it leaves the main page and the strings list
+        page.get_by_role("link", name=re.compile("Starling")).first.click()
+        page.get_by_role("button", name="Edit", exact=True).click()
+        page.locator("#gf-life").select_option("sold")
+        expect(page.locator("#gf-sprice")).to_be_visible()
+        expect(page.locator("#gf-wprice")).to_be_hidden()
+        page.locator("#gf-sdate").fill("2026-01-15")
+        page.locator("#gf-sprice").fill("650")
+        page.get_by_role("button", name="Save changes").click()
+        expect(page.locator(".life-banner.sold")).to_contain_text("$650")
+        page.goto(app_url + "/#/")
+        expect(page.locator(".gear-card", has_text="Starling")).to_have_count(0)
+        page.goto(app_url + "/#/due")
+        expect(page.locator(".due", has_text="Starling")).to_have_count(0)
+        page.goto(app_url + "/#/sold")
+        cell = page.locator(".gear-cell.sold", has_text="Starling")
+        expect(cell).to_contain_text("$650")
+        expect(cell.locator(".star")).to_have_count(0)
+        assert float(cell.locator(".gear-card").evaluate("el => getComputedStyle(el).opacity")) < 1
+        assert_no_overflow(page, "sold view")
+
+        # hiding the sold archive removes its tab
+        req = page.request
+        req.put(app_url + "/api/settings", data={"feature_sold": False})
+        page.goto(app_url + "/#/")
+        page.reload()
+        expect(page.locator(".seg").get_by_role("link", name="Sold")).to_have_count(0)
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_share_link_create_view_and_turn_off(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.on("dialog", lambda d: d.accept())
+        sign_in(page, app_url)
+        page.get_by_role("link", name=re.compile("Starling")).first.click()
+        box = page.locator("#gd-share")
+        box.locator("[data-share-expiry-new]").select_option("30")
+        box.get_by_role("button", name="Create link").click()
+        url = box.locator("[data-share-url]").inner_text()
+        assert re.search(r"/share/[A-Za-z0-9_-]{32}$", url)
+        expect(box).to_contain_text("Expires")
+        assert_no_overflow(page, "gear page with share link")
+
+        viewer = browser.new_context(viewport={"width": width, "height": height})
+        guest = viewer.new_page()
+        resp = guest.goto(url)
+        assert "noindex" in resp.headers["x-robots-tag"]
+        expect(guest.get_by_role("heading", name="Starling")).to_be_visible()
+        expect(guest.get_by_text("3-tone sunburst")).to_be_visible()
+        assert guest.locator("a, button, form, input").count() == 0
+        assert guest.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+
+        box.get_by_role("button", name="Turn off").click()
+        expect(box.get_by_role("button", name="Create link")).to_be_visible()
+        assert guest.goto(url).status == 404
+
+        # sets share the same way
+        page.get_by_role("link", name="Sets", exact=True).click()
+        page.locator(".set-card", has_text="Practice board").get_by_role("button", name="Share").click()
+        page.locator("#share-box").get_by_role("button", name="Create link").click()
+        set_url = page.locator("#share-box [data-share-url]").inner_text()
+        guest.goto(set_url)
+        expect(guest.get_by_role("heading", name="Practice board")).to_be_visible()
+        expect(guest.locator(".share-item")).to_have_count(4)
+        assert guest.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+        viewer.close()
+        browser.close()

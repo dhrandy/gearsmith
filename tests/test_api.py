@@ -1067,7 +1067,7 @@ def test_v030_database_upgrade_keeps_every_row(tmp_path):
         conn.row_factory = None
         for t in tables:
             cols = [r[1] for r in conn.execute(f"PRAGMA table_info({t})")
-                    if r[1] not in ("strings_id", "sets_on_hand", "manual_url")]
+                    if r[1] not in ("strings_id", "sets_on_hand", "manual_url", "current_value")]
             after = conn.execute(f"SELECT {', '.join(cols)} FROM {t} ORDER BY rowid").fetchall()
             assert after == before[t], t
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -1242,3 +1242,140 @@ def test_controls_carry_settings(tmp_path):
         r = c.patch(f"/api/gear/{amp}", json={"specs": {"controls": [{"name": "Gain", "kind": "knob"}]}})
         assert "value" not in r.json()["controls"][0]
 
+
+
+def test_value_tracking_and_collection_totals(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        starling, heron, club = (by_name[n]["id"] for n in ("Starling", "Heron", "Club 20"))
+        assert c.get("/api/collection").json()["owned"]["priced"] == 0
+
+        r = c.patch(f"/api/gear/{starling}", json={"purchase_price": 900, "current_value": 1100.5})
+        assert (r.json()["purchase_price"], r.json()["current_value"]) == (900, 1100.5)
+        c.patch(f"/api/gear/{heron}", json={"purchase_price": 600})  # no value: counts at price paid
+        c.patch(f"/api/gear/{club}", json={"current_value": 500})  # value only
+        c.post("/api/gear", json={"type": "guitar", "name": "Wish", "lifecycle": "want", "want_price": 2000})
+        c.post("/api/gear", json={"type": "pedal", "name": "Old Fuzz", "lifecycle": "sold",
+                                  "purchase_price": 100, "sold_price": 150})
+        assert c.patch(f"/api/gear/{starling}", json={"current_value": -1}).status_code == 422
+
+        total = c.get("/api/collection").json()
+        owned = total["owned"]
+        assert owned["items"] == len(by_name)
+        assert (owned["priced"], owned["valued"]) == (2, 2)
+        assert (owned["paid"], owned["value"], owned["change"]) == (1500, 2200.5, 200.5)
+        # the want list and sold gear never count toward the collection
+        assert total["want"] == {"items": 1, "priced": 1, "total": 2000}
+        assert total["sold"] == {"items": 1, "total": 150, "paid": 100}
+        guitars = next(t for t in total["by_type"] if t["type"] == "guitar")
+        assert (guitars["paid"], guitars["value"]) == (1500, 1700.5)
+
+        # the token API sees the same totals and the new field
+        h = {"Authorization": f"Bearer {c.post('/api/tokens', json={'name': 'bot'}).json()['token']}"}
+        assert c.get("/api/v1/collection", headers=h).json() == total
+        new = c.post("/api/v1/gear", headers=h, json={"type": "pick", "name": "Pick", "current_value": 3}).json()
+        assert new["current_value"] == 3
+        assert c.get("/api/collection").status_code == 200
+        assert TestClient(main.app).get("/api/collection").status_code == 401
+
+        # a PUT from the edit form can clear the value
+        g = c.get(f"/api/gear/{starling}").json()
+        body = {k: g[k] for k in ("type", "name", "make", "model", "purchase_price", "notes")}
+        assert c.put(f"/api/gear/{starling}", json={**body, "current_value": None}).json()["current_value"] is None
+
+        # value stays private on share pages
+        c.patch(f"/api/gear/{starling}", json={"current_value": 4321})
+        share = c.post(f"/api/gear/{starling}/share").json()["share"]
+        page = TestClient(main.app).get(share["url"]).text
+        assert "4321" not in page and "4,321" not in page
+
+
+def test_value_column_added_to_older_database(tmp_path):
+    fresh(tmp_path)
+    with main.db() as conn:
+        conn.execute("ALTER TABLE gear DROP COLUMN current_value")
+    main.init_db()
+    with main.db() as conn:
+        assert "current_value" in {r["name"] for r in conn.execute("PRAGMA table_info(gear)")}
+
+
+def test_setlists_order_songs_and_show_presets(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        preset = c.post("/api/presets", json={
+            "name": "Crunch", "rig": [{"gear_id": by_name["Demo Drive"]["id"], "knobs": [{"name": "Gain", "value": "6"}]}],
+        }).json()
+        one = c.post("/api/songs", json={"title": "One", "tuning": "E standard",
+                                         "presets": [{"preset_id": preset["id"], "label": "Chorus"}]}).json()
+        two = c.post("/api/songs", json={"title": "Two", "tuning": "Drop D"}).json()
+        three = c.post("/api/songs", json={"title": "Three"}).json()
+
+        r = c.post("/api/setlists", json={"name": " Practice ", "songs": [{"song_id": two["id"]}, {"song_id": one["id"], "note": "slow"}]})
+        assert r.status_code == 201
+        sl = r.json()
+        assert sl["name"] == "Practice" and sl["song_count"] == 2
+        assert [e["song"]["title"] for e in sl["songs"]] == ["Two", "One"]
+        assert sl["songs"][1]["note"] == "slow"
+        # each entry carries the song's linked preset with its knob settings
+        linked = sl["songs"][1]["song"]["presets"][0]
+        assert linked["label"] == "Chorus" and linked["preset"]["rig"][0]["knobs"][0] == {"name": "Gain", "value": "6"}
+
+        # reorder, add, allow a repeat
+        order = [one["id"], three["id"], two["id"], one["id"]]
+        r = c.patch(f"/api/setlists/{sl['id']}", json={"songs": [{"song_id": s} for s in order]})
+        assert [e["song_id"] for e in r.json()["songs"]] == order
+        assert c.patch(f"/api/setlists/{sl['id']}", json={"notes": "warm up"}).json()["song_count"] == 4
+        listed = c.get("/api/setlists").json()
+        assert listed[0]["song_titles"] == ["One", "Three", "Two", "One"] and listed[0]["notes"] == "warm up"
+
+        # an unknown song changes nothing
+        assert c.patch(f"/api/setlists/{sl['id']}", json={"songs": [{"song_id": 999}]}).status_code == 404
+        assert c.get(f"/api/setlists/{sl['id']}").json()["song_count"] == 4
+        # deleting a song drops it from setlists; deleting a setlist keeps the songs
+        c.delete(f"/api/songs/{three['id']}")
+        assert c.get(f"/api/setlists/{sl['id']}").json()["song_titles"] == ["One", "Two", "One"]
+        assert "setlists" in c.get("/api/export").json()
+
+        h = {"Authorization": f"Bearer {c.post('/api/tokens', json={'name': 'bot'}).json()['token']}"}
+        made = c.post("/api/v1/setlists", headers=h, json={"name": "Gig", "songs": [{"song_id": two["id"]}]})
+        assert made.status_code == 201 and made.json()["added_by"] == "admin-test"
+        assert len(c.get("/api/v1/setlists", headers=h).json()) == 2
+        assert c.delete(f"/api/setlists/{sl['id']}").json() == {"ok": True}
+        assert c.get(f"/api/setlists/{sl['id']}").status_code == 404
+        assert c.get(f"/api/songs/{one['id']}").status_code == 200
+        assert TestClient(main.app).get("/api/setlists").status_code == 401
+        assert c.post("/api/setlists", json={"name": ""}).status_code == 422
+
+
+def test_set_items_carry_pedal_power_and_keep_board_order(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        s = c.get("/api/sets").json()[0]
+        pedals = [i for i in s["items"] if i["type"] == "pedal"]
+        assert {p["ma_draw"] for p in pedals} == {15, 40} and pedals[0]["voltage"] == "9V"
+        assert all(i["ma_draw"] is None for i in s["items"] if i["type"] != "pedal")
+        flipped = [i["id"] for i in reversed(s["items"])]
+        assert [i["id"] for i in c.patch(f"/api/sets/{s['id']}", json={"item_ids": flipped}).json()["items"]] == flipped
+
+
+def test_install_manifest_and_icons(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        manifest = c.get("/static/manifest.json").json()
+        assert manifest["display"] == "standalone" and manifest["start_url"] == "/"
+        purposes = {i["purpose"] for i in manifest["icons"]}
+        assert {"any", "maskable"} <= purposes
+        for icon in manifest["icons"]:
+            r = c.get(icon["src"])
+            assert r.status_code == 200
+            if icon["type"] == "image/png":
+                w, h = int.from_bytes(r.content[16:20], "big"), int.from_bytes(r.content[20:24], "big")
+                assert f"{w}x{h}" == icon["sizes"]
+        page = c.get("/").text
+        assert 'rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png"' in page
+        assert c.get("/static/apple-touch-icon.png").content[:8] == b"\x89PNG\r\n\x1a\n"

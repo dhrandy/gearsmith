@@ -265,6 +265,7 @@ def init_db() -> None:
           purchase_price REAL,
           notes TEXT NOT NULL DEFAULT '',
           restring_interval_days INTEGER,
+          favorite INTEGER NOT NULL DEFAULT 0,
           created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
@@ -305,8 +306,17 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_photos_gear ON gear_photos(gear_id);
         """
         )
+        migrate(c)
         if fresh:
             seed_example(c)
+
+
+def migrate(c) -> None:
+    # Columns added after the first release. CREATE TABLE IF NOT EXISTS leaves an existing
+    # database alone, so older installs get them here.
+    gear_cols = {r["name"] for r in c.execute("PRAGMA table_info(gear)")}
+    if "favorite" not in gear_cols:
+        c.execute("ALTER TABLE gear ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0")
 
 
 def seed_example(c) -> None:
@@ -691,6 +701,7 @@ def gear_dict(c, row, on: date | None = None) -> dict[str, Any]:
         "purchase_price": row["purchase_price"],
         "notes": row["notes"],
         "restring_interval_days": row["restring_interval_days"],
+        "favorite": bool(row["favorite"]),
         "strings": strings_info(c, row, on),
         "photos": photos,
         "cover": photos[0]["url"] if photos else None,
@@ -719,6 +730,7 @@ class GearIn(BaseModel):
     purchase_price: float | None = Field(default=None, ge=0, le=10_000_000)
     notes: str = Field(default="", max_length=4000)
     restring_interval_days: int | None = Field(default=None, ge=1, le=730)
+    favorite: bool | None = None
 
     @field_validator("purchase_date")
     @classmethod
@@ -738,6 +750,7 @@ class GearPatch(BaseModel):
     purchase_price: float | None = Field(default=None, ge=0, le=10_000_000)
     notes: str | None = Field(default=None, max_length=4000)
     restring_interval_days: int | None = Field(default=None, ge=1, le=730)
+    favorite: bool | None = None
 
     @field_validator("purchase_date")
     @classmethod
@@ -751,13 +764,13 @@ def create_gear(c, body: GearIn, user_id: int | None) -> int:
     stamp = now_iso()
     return c.execute(
         """INSERT INTO gear(type,name,make,model,year,serial,specs,status,purchase_date,
-           purchase_price,notes,restring_interval_days,created_by,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           purchase_price,notes,restring_interval_days,favorite,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             body.type, body.name.strip(), body.make.strip(), body.model.strip(), body.year,
             body.serial.strip(), json.dumps(clean_specs(body.type, body.specs)), body.status,
             body.purchase_date, body.purchase_price, body.notes.strip(), body.restring_interval_days,
-            user_id, stamp, stamp,
+            int(bool(body.favorite)), user_id, stamp, stamp,
         ),
     ).lastrowid
 
@@ -770,6 +783,11 @@ def patch_gear(c, row, body: GearPatch) -> None:
     data["specs"] = json.dumps(specs)
     if row["type"] != "guitar" and data.get("restring_interval_days") is not None:
         raise HTTPException(400, "Only guitars have a restring interval")
+    if "favorite" in data:
+        # null means "leave it alone", so a full PUT from an older client never clears the star
+        favorite = data.pop("favorite")
+        if favorite is not None:
+            data["favorite"] = int(favorite)
     if "name" in data:
         data["name"] = data["name"].strip()
     for key in ("make", "model", "serial", "notes"):
@@ -791,7 +809,7 @@ def list_gear(request: Request, type: str | None = None):
                 raise HTTPException(400, "Unknown gear type")
             sql += " WHERE type=?"
             params = (type,)
-        sql += " ORDER BY type, name COLLATE NOCASE"
+        sql += " ORDER BY type, favorite DESC, name COLLATE NOCASE"
         return [gear_dict(c, r) for r in c.execute(sql, params)]
 
 
@@ -1401,7 +1419,7 @@ def v1_list_gear(request: Request, type: str | None = None):
                 raise HTTPException(400, "Unknown gear type")
             sql += " WHERE type=?"
             params = (type,)
-        sql += " ORDER BY type, name COLLATE NOCASE"
+        sql += " ORDER BY type, favorite DESC, name COLLATE NOCASE"
         return [gear_dict(c, r) for r in c.execute(sql, params)]
 
 

@@ -186,7 +186,12 @@ function route() {
     else if (parts[1]) presetDetailView(Number(parts[1]));
     else presetsView();
   }
-  else if (parts[0] === "sets") { tab = "sets"; featureOn("feature_sets") ? setsView() : (location.hash = "#/"); }
+  else if (parts[0] === "sets") {
+    tab = "sets";
+    if (!featureOn("feature_sets")) location.hash = "#/";
+    else if (parts[1]) setDetailView(Number(parts[1]));
+    else setsView();
+  }
   else if (parts[0] === "due") { tab = "due"; featureOn("feature_maintenance") ? dueView() : (location.hash = "#/"); }
   else if (parts[0] === "settings") { tab = "settings"; settingsView(); }
   else { gearListView(); }
@@ -533,7 +538,7 @@ async function gearDetailView(id) {
         <button class="small danger" id="gd-delete" type="button">Delete</button>
       </div>
     </div>
-    <p class="muted wrap-any">${esc(g.type_singular || TYPE_SINGULAR[g.type])}${g.sets.length ? " · in " + g.sets.map((s) => esc(s.name)).join(", ") : ""}</p>
+    <p class="muted wrap-any">${esc(g.type_singular || TYPE_SINGULAR[g.type])}${g.sets.length ? " · in " + g.sets.map((s) => setLink(s.id, s.name)).join(", ") : ""}</p>
     ${g.lifecycle === "want" ? `<div class="life-banner want">On your want list${g.want_price != null ? ` · want price ${esc(fmtPrice(g.want_price))}` : ""}</div>` : ""}
     ${g.lifecycle === "sold" ? `<div class="life-banner sold">Sold${g.sold_date ? ` on ${esc(fmtDate(g.sold_date))}` : ""}${g.sold_price != null ? ` for ${esc(fmtPrice(g.sold_price))}` : ""} · kept as history</div>` : ""}
     <div class="hero">
@@ -603,7 +608,7 @@ async function gearDetailView(id) {
     <h2>Sets</h2>
     <div class="card">
       <div class="set-chips" id="gd-sets">
-        ${g.sets.map((s) => `<span class="set-chip" title="${esc(s.name)}">${esc(s.name)}</span>`).join("") || `<span class="muted">Not in any set.</span>`}
+        ${g.sets.map((s) => `<a class="set-chip link-chip" href="#/sets/${s.id}" title="${esc(s.name)}">${esc(s.name)}</a>`).join("") || `<span class="muted">Not in any set.</span>`}
       </div>
     </div>` : ""}`;
 
@@ -1014,6 +1019,7 @@ function knobText(knobs) {
 }
 
 const gearLink = (gid, name) => (gid ? `<a href="#/gear/${gid}">${esc(name)}</a>` : esc(name));
+const setLink = (sid, name) => (sid && featureOn("feature_sets") ? `<a href="#/sets/${sid}">${esc(name)}</a>` : esc(name));
 
 function chainHtml(rig) {
   return `<ol class="chain">
@@ -1149,7 +1155,7 @@ async function songDetailView(id) {
   const rigFacts = [
     ["Guitar", s.guitar_name ? gearLink(s.guitar_id, s.guitar_name) : ""],
     ["Amp", s.amp_name ? gearLink(s.amp_id, s.amp_name) : ""],
-    ["Set", s.set_name && featureOn("feature_sets") ? esc(s.set_name) : ""],
+    ["Set", s.set_name && featureOn("feature_sets") ? setLink(s.set_id, s.set_name) : ""],
   ].filter(([, v]) => v);
   view.innerHTML = `
     <div class="pagehead">
@@ -1671,7 +1677,7 @@ async function setsView() {
       ${sets.length ? sets.map((s) => `
         <div class="set-card">
           <div class="row set-card-head">
-            <strong>${esc(s.name)}</strong>
+            <strong><a class="set-name" href="#/sets/${s.id}">${esc(s.name)}</a></strong>
             <span class="row">
               <button class="small ghost" data-shareset="${s.id}" type="button">${s.share && !s.share.expired ? "Shared" : "Share"}</button>
               <button class="small ghost" data-editset="${s.id}" type="button">Edit</button>
@@ -1679,13 +1685,7 @@ async function setsView() {
             </span>
           </div>
           ${s.notes ? `<p class="muted set-notes" style="margin:6px 0 0">${esc(s.notes)}</p>` : ""}
-          <div class="set-members">
-            ${s.items.map((i) => `
-              <a class="set-member" href="#/gear/${i.id}" title="${esc(i.name)}">
-                <span class="thumb">${i.cover ? `<img src="${i.cover}" alt="" />` : TYPE_ICON[i.type]}</span>
-                <span class="set-member-name">${esc(i.name)}</span>
-              </a>`).join("") || `<span class="muted">Empty set.</span>`}
-          </div>
+          ${setMembersHtml(s)}
         </div>`).join("") : `<p class="empty">No sets yet. Make one for a board or rig.</p>`}
     </div>`;
   document.getElementById("add-set").addEventListener("click", () => setForm());
@@ -1707,7 +1707,64 @@ async function setsView() {
   }));
 }
 
-async function setForm(existing = null) {
+function setMembersHtml(s) {
+  return `<div class="set-members">
+            ${s.items.map((i) => `
+              <a class="set-member" href="#/gear/${i.id}" title="${esc(i.name)}">
+                <span class="thumb">${i.cover ? `<img src="${i.cover}" alt="" />` : TYPE_ICON[i.type]}</span>
+                <span class="set-member-name">${esc(i.name)}</span>
+              </a>`).join("") || `<span class="muted">Empty set.</span>`}
+          </div>`;
+}
+
+async function setDetailView(id) {
+  let s;
+  try {
+    s = await api(`/api/sets/${id}`);
+  } catch (ex) {
+    view.innerHTML = `
+      <div class="pagehead"><h1>Set not found</h1></div>
+      <p class="muted">This set may have been deleted.</p>
+      <p><a class="btn" href="#/sets">All sets</a></p>`;
+    return;
+  }
+  const count = s.items.length;
+  view.innerHTML = `
+    <p class="crumb"><a href="#/sets">Sets</a></p>
+    <div class="pagehead">
+      <h1>${esc(s.name)}</h1>
+      <div class="row">
+        <button class="small" id="sd-set-edit" type="button">Edit</button>
+        <button class="small danger" id="sd-set-delete" type="button">Delete</button>
+      </div>
+    </div>
+    <p class="muted wrap-any" style="margin-top:0">${count} item${count === 1 ? "" : "s"}</p>
+    ${s.notes ? `<p class="notes wrap-any">${esc(s.notes)}</p>` : ""}
+    <h2>Gear</h2>
+    <div class="card">${setMembersHtml(s)}</div>
+    <h2>Share</h2>
+    <div class="card" id="sd-set-share"></div>`;
+  document.getElementById("sd-set-edit").addEventListener("click", () => setForm(s, () => setDetailView(id)));
+  document.getElementById("sd-set-delete").addEventListener("click", () => {
+    openSheet(`
+      <h2>Delete ${esc(s.name)}?</h2>
+      <p class="muted">This removes the set. The gear in it stays.</p>
+      <div class="sheet-actions">
+        <button type="button" id="del-cancel">Cancel</button>
+        <button class="primary danger" id="del-confirm" type="button">Delete</button>
+      </div>`);
+    document.getElementById("del-cancel").addEventListener("click", closeSheet);
+    document.getElementById("del-confirm").addEventListener("click", async () => {
+      await api(`/api/sets/${id}`, { method: "DELETE" });
+      closeSheet();
+      toast("Set deleted");
+      location.hash = "#/sets";
+    });
+  });
+  mountShare(document.getElementById("sd-set-share"), "set", s.id, s.share);
+}
+
+async function setForm(existing = null, onDone = setsView) {
   const gear = await api("/api/gear");
   const chosen = new Set(existing ? existing.items.map((i) => i.id) : []);
   openSheet(`
@@ -1748,7 +1805,7 @@ async function setForm(existing = null) {
       }
       closeSheet();
       toast(existing ? "Saved" : "Set created");
-      setsView();
+      onDone();
     } catch (ex) {
       document.getElementById("sf-error").textContent = ex.message;
     }

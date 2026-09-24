@@ -184,8 +184,8 @@ async function gearListView() {
             <a class="gear-card" href="#/gear/${g.id}">
               <span class="thumb">${g.cover ? `<img src="${g.cover}" alt="" />` : TYPE_ICON[g.type]}</span>
               <span class="gc-body">
-                <span class="gc-name">${esc(g.name)}</span>
-                <span class="gc-meta">${esc([g.make, g.model].filter(Boolean).join(" · ")) || "&nbsp;"}</span>
+                <span class="gc-name" title="${esc(g.name)}">${esc(g.name)}</span>
+                <span class="gc-meta" title="${esc([g.make, g.model].filter(Boolean).join(" · "))}">${esc([g.make, g.model].filter(Boolean).join(" · ")) || "&nbsp;"}</span>
                 <span class="gc-foot">
                   ${g.type === "guitar" ? stringsChip(g.strings) : ""}
                   ${g.status && g.status !== "home" ? `<span class="badge ${esc(g.status)}">${esc(g.status_label)}</span>` : ""}
@@ -326,7 +326,7 @@ async function gearDetailView(id) {
         <button class="small danger" id="gd-delete" type="button">Delete</button>
       </div>
     </div>
-    <p class="muted">${esc(g.type_label.slice(0, -1))}${g.sets.length ? " · in " + g.sets.map((s) => esc(s.name)).join(", ") : ""}</p>
+    <p class="muted wrap-any">${esc(g.type_label.slice(0, -1))}${g.sets.length ? " · in " + g.sets.map((s) => esc(s.name)).join(", ") : ""}</p>
     <div class="hero">
       <div class="hero-photo">${g.cover ? `<img src="${g.cover}" alt="" />` : TYPE_ICON[g.type]}</div>
       <div>
@@ -364,14 +364,14 @@ async function gearDetailView(id) {
         <div>${stringsChip(g.strings, true)}</div>
         <button class="primary small" id="log-restring" type="button">Log a restring</button>
       </div>
-      <p class="hint">Changed every ${g.strings.interval_days} days${g.strings.last_date ? ` · last: ${esc(g.strings.last_brand || "unknown")} ${esc(g.strings.last_gauge || "")} on ${fmtDate(g.strings.last_date)}` : ""}.</p>
+      <p class="hint wrap-any">Changed every ${g.strings.interval_days} days${g.strings.last_date ? ` · last: ${esc(g.strings.last_brand || "unknown")} ${esc(g.strings.last_gauge || "")} on ${fmtDate(g.strings.last_date)}` : ""}.</p>
       <div id="restring-history" class="stack" style="margin-top:10px"></div>
     </div>` : ""}
     ${featureOn("feature_sets") ? `
     <h2>Sets</h2>
     <div class="card">
       <div class="set-chips" id="gd-sets">
-        ${g.sets.map((s) => `<span class="set-chip">${esc(s.name)}</span>`).join("") || `<span class="muted">Not in any set.</span>`}
+        ${g.sets.map((s) => `<span class="set-chip" title="${esc(s.name)}">${esc(s.name)}</span>`).join("") || `<span class="muted">Not in any set.</span>`}
       </div>
     </div>` : ""}`;
 
@@ -490,19 +490,19 @@ async function setsView() {
     <div class="stack" id="sets-list">
       ${sets.length ? sets.map((s) => `
         <div class="set-card">
-          <div class="row" style="justify-content:space-between">
+          <div class="row set-card-head">
             <strong>${esc(s.name)}</strong>
             <span class="row">
               <button class="small ghost" data-editset="${s.id}" type="button">Edit</button>
               <button class="small ghost danger" data-delset="${s.id}" type="button">Delete</button>
             </span>
           </div>
-          ${s.notes ? `<p class="muted" style="margin:6px 0 0">${esc(s.notes)}</p>` : ""}
+          ${s.notes ? `<p class="muted set-notes" style="margin:6px 0 0">${esc(s.notes)}</p>` : ""}
           <div class="set-members">
             ${s.items.map((i) => `
-              <a class="set-member" href="#/gear/${i.id}">
+              <a class="set-member" href="#/gear/${i.id}" title="${esc(i.name)}">
                 <span class="thumb">${i.cover ? `<img src="${i.cover}" alt="" />` : TYPE_ICON[i.type]}</span>
-                ${esc(i.name)}
+                <span class="set-member-name">${esc(i.name)}</span>
               </a>`).join("") || `<span class="muted">Empty set.</span>`}
           </div>
         </div>`).join("") : `<p class="empty">No sets yet. Make one for a board or rig.</p>`}
@@ -670,7 +670,7 @@ async function settingsView() {
       </form>
       <div id="token-result">${state.newToken ? `
         <div class="stack" style="margin-top:12px">
-          <p class="hint" style="margin:0">New token <strong>${esc(state.newToken.name)}</strong>. Copy it now; it won't be shown again.</p>
+          <p class="hint wrap-any" style="margin:0">New token <strong>${esc(state.newToken.name)}</strong>. Copy it now; it won't be shown again.</p>
           <div class="token-new" id="token-value" style="user-select:all">${esc(state.newToken.token)}</div>
           <div class="row">
             <button class="small primary" id="token-copy" type="button">Copy token</button>

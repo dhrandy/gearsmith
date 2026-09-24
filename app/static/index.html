@@ -6,7 +6,13 @@
     <meta name="theme-color" content="#0d1117" />
     <link rel="manifest" href="/static/manifest.json" />
     <link rel="icon" type="image/svg+xml" href="/static/icon.svg" />
-    <link rel="apple-touch-icon" href="/static/icon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/static/icon-192.png" />
+    <!-- iPhones ignore SVG touch icons, so the home-screen icon needs a PNG -->
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Gearsmith" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black" />
     <title>Gearsmith</title>
     <link rel="stylesheet" href="/static/style.css" />
   </head>

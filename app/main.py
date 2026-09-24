@@ -16,7 +16,7 @@ from collections import defaultdict, deque
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.openapi.docs import get_swagger_ui_html
@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks"}
@@ -383,6 +383,63 @@ def init_db() -> None:
           sort INTEGER NOT NULL DEFAULT 0,
           created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS presets (
+          id INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          artist TEXT NOT NULL DEFAULT '',
+          amp_id INTEGER REFERENCES gear(id) ON DELETE SET NULL,
+          amp_name TEXT NOT NULL DEFAULT '',
+          notes TEXT NOT NULL DEFAULT '',
+          created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS preset_gear_settings (
+          id INTEGER PRIMARY KEY,
+          preset_id INTEGER NOT NULL REFERENCES presets(id) ON DELETE CASCADE,
+          gear_id INTEGER REFERENCES gear(id) ON DELETE SET NULL,
+          gear_name TEXT NOT NULL DEFAULT '',
+          position INTEGER NOT NULL DEFAULT 0,
+          engaged TEXT NOT NULL DEFAULT 'on',
+          knobs TEXT NOT NULL DEFAULT '[]',
+          note TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS preset_device_patches (
+          id INTEGER PRIMARY KEY,
+          preset_id INTEGER NOT NULL REFERENCES presets(id) ON DELETE CASCADE,
+          gear_id INTEGER REFERENCES gear(id) ON DELETE SET NULL,
+          gear_name TEXT NOT NULL DEFAULT '',
+          position INTEGER NOT NULL DEFAULT 0,
+          patch_ref TEXT NOT NULL DEFAULT '',
+          patch_name TEXT NOT NULL DEFAULT '',
+          scenes TEXT NOT NULL DEFAULT '[]',
+          midi TEXT,
+          note TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS preset_effect_blocks (
+          id INTEGER PRIMARY KEY,
+          patch_id INTEGER NOT NULL REFERENCES preset_device_patches(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL DEFAULT 0,
+          slot TEXT NOT NULL DEFAULT '',
+          block_type TEXT NOT NULL DEFAULT '',
+          model TEXT NOT NULL DEFAULT '',
+          enabled INTEGER NOT NULL DEFAULT 1,
+          params TEXT NOT NULL DEFAULT '[]',
+          scene_overrides TEXT
+        );
+        CREATE TABLE IF NOT EXISTS song_presets (
+          id INTEGER PRIMARY KEY,
+          song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+          preset_id INTEGER NOT NULL REFERENCES presets(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL DEFAULT 0,
+          label TEXT NOT NULL DEFAULT '',
+          note TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_preset_settings ON preset_gear_settings(preset_id, position);
+        CREATE INDEX IF NOT EXISTS idx_preset_patches ON preset_device_patches(preset_id, position);
+        CREATE INDEX IF NOT EXISTS idx_preset_blocks ON preset_effect_blocks(patch_id, position);
+        CREATE INDEX IF NOT EXISTS idx_song_presets ON song_presets(song_id, position);
+        CREATE INDEX IF NOT EXISTS idx_preset_songs ON song_presets(preset_id);
         CREATE INDEX IF NOT EXISTS idx_gear_type ON gear(type);
         CREATE INDEX IF NOT EXISTS idx_song_settings ON song_gear_settings(song_id, position);
         CREATE INDEX IF NOT EXISTS idx_song_patches ON song_device_patches(song_id, position);
@@ -1653,6 +1710,7 @@ MAX_RIG = 40
 MAX_PATCHES = 20
 MAX_BLOCKS = 40
 MAX_SCENES = 16
+MAX_SONG_PRESETS = 20
 ENGAGED = ("on", "off", "toggle")
 TUNING_SUGGESTIONS = ["E Std", "Eb", "D Std", "Drop D", "Drop C#", "Drop C", "DADGAD", "Open G", "Open D", "Open E"]
 
@@ -1732,6 +1790,7 @@ class SongIn(BaseModel):
     notes: str = Field(default="", max_length=4000)
     rig: list[RigSettingIn] | None = Field(default=None, max_length=MAX_RIG)
     patches: list[PatchIn] | None = Field(default=None, max_length=MAX_PATCHES)
+    presets: list["SongPresetIn"] | None = Field(default=None, max_length=MAX_SONG_PRESETS)
 
 
 class SongPatch(BaseModel):
@@ -1747,6 +1806,53 @@ class SongPatch(BaseModel):
     notes: str | None = Field(default=None, max_length=4000)
     rig: list[RigSettingIn] | None = Field(default=None, max_length=MAX_RIG)
     patches: list[PatchIn] | None = Field(default=None, max_length=MAX_PATCHES)
+    presets: list["SongPresetIn"] | None = Field(default=None, max_length=MAX_SONG_PRESETS)
+
+
+class SongPresetIn(BaseModel):
+    preset_id: int
+    label: str = Field(default="", max_length=40)
+    note: str = Field(default="", max_length=1000)
+
+
+class PresetIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    artist: str = Field(default="", max_length=120)
+    amp_id: int | None = None
+    notes: str = Field(default="", max_length=4000)
+    rig: list[RigSettingIn] | None = Field(default=None, max_length=MAX_RIG)
+    patches: list[PatchIn] | None = Field(default=None, max_length=MAX_PATCHES)
+
+
+class PresetPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    artist: str | None = Field(default=None, max_length=120)
+    amp_id: int | None = None
+    notes: str | None = Field(default=None, max_length=4000)
+    rig: list[RigSettingIn] | None = Field(default=None, max_length=MAX_RIG)
+    patches: list[PatchIn] | None = Field(default=None, max_length=MAX_PATCHES)
+
+
+class SaveAsPresetIn(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    use_in_song: bool = False
+
+
+SongIn.model_rebuild()
+SongPatch.model_rebuild()
+
+
+class Owner(NamedTuple):
+    """Where a signal chain lives: on a song, or on a reusable preset."""
+
+    col: str
+    rig: str
+    patches: str
+    blocks: str
+
+
+SONG = Owner("song_id", "song_gear_settings", "song_device_patches", "song_effect_blocks")
+PRESET = Owner("preset_id", "preset_gear_settings", "preset_device_patches", "preset_effect_blocks")
 
 
 def knobs_json(knobs: list[Knob] | None) -> str:
@@ -1797,9 +1903,9 @@ def block_dict(row) -> dict[str, Any]:
     }
 
 
-def patch_dict(c, row) -> dict[str, Any]:
+def patch_dict(c, row, o: Owner = SONG) -> dict[str, Any]:
     blocks = c.execute(
-        "SELECT * FROM song_effect_blocks WHERE patch_id=? ORDER BY position, id", (row["id"],)
+        f"SELECT * FROM {o.blocks} WHERE patch_id=? ORDER BY position, id", (row["id"],)
     ).fetchall()
     return {
         "id": row["id"],
@@ -1840,22 +1946,33 @@ def song_summary(c, row) -> dict[str, Any]:
         "set_name": row["set_name"],
         "notes": row["notes"],
         "cover": photos[0]["url"] if photos else None,
+        "preset_names": [
+            r["name"] for r in c.execute(
+                """SELECT p.name FROM song_presets sp JOIN presets p ON p.id=sp.preset_id
+                WHERE sp.song_id=? ORDER BY sp.position, sp.id""",
+                (row["id"],),
+            )
+        ],
         "added_by": display_user(c, row["created_by"]) or "System",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
 
 
-def song_dict(c, row) -> dict[str, Any]:
-    out = song_summary(c, row)
+def chain_of(c, owner_id: int, o: Owner) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rig = c.execute(
-        "SELECT * FROM song_gear_settings WHERE song_id=? ORDER BY position, id", (row["id"],)
+        f"SELECT * FROM {o.rig} WHERE {o.col}=? ORDER BY position, id", (owner_id,)
     ).fetchall()
     patches = c.execute(
-        "SELECT * FROM song_device_patches WHERE song_id=? ORDER BY position, id", (row["id"],)
+        f"SELECT * FROM {o.patches} WHERE {o.col}=? ORDER BY position, id", (owner_id,)
     ).fetchall()
-    out["rig"] = [rig_dict(r) for r in rig]
-    out["patches"] = [patch_dict(c, p) for p in patches]
+    return [rig_dict(r) for r in rig], [patch_dict(c, p, o) for p in patches]
+
+
+def song_dict(c, row) -> dict[str, Any]:
+    out = song_summary(c, row)
+    out["rig"], out["patches"] = chain_of(c, row["id"], SONG)
+    out["presets"] = song_preset_list(c, row["id"])
     out["photos"] = song_photo_list(c, row["id"])
     return out
 
@@ -1880,23 +1997,23 @@ def song_links(c, data: dict[str, Any]) -> dict[str, Any]:
     return cols
 
 
-def insert_rig_setting(c, song_id: int, item: RigSettingIn, position: int) -> int:
+def insert_rig_setting(c, owner_id: int, item: RigSettingIn, position: int, o: Owner = SONG) -> int:
     gear_id, name = gear_link(c, item.gear_id, None, item.gear_name)
     if not name:
         raise HTTPException(400, "Each rig entry needs gear or a gear name")
     return c.execute(
-        """INSERT INTO song_gear_settings(song_id,gear_id,gear_name,position,engaged,knobs,note)
+        f"""INSERT INTO {o.rig}({o.col},gear_id,gear_name,position,engaged,knobs,note)
         VALUES(?,?,?,?,?,?,?)""",
-        (song_id, gear_id, name, item.position if item.position is not None else position,
+        (owner_id, gear_id, name, item.position if item.position is not None else position,
          item.engaged, knobs_json(item.knobs), item.note.strip()),
     ).lastrowid
 
 
-def write_blocks(c, patch_id: int, blocks: list[EffectBlockIn]) -> None:
-    c.execute("DELETE FROM song_effect_blocks WHERE patch_id=?", (patch_id,))
+def write_blocks(c, patch_id: int, blocks: list[EffectBlockIn], o: Owner = SONG) -> None:
+    c.execute(f"DELETE FROM {o.blocks} WHERE patch_id=?", (patch_id,))
     for pos, b in enumerate(blocks):
         c.execute(
-            """INSERT INTO song_effect_blocks(patch_id,position,slot,block_type,model,enabled,params,scene_overrides)
+            f"""INSERT INTO {o.blocks}(patch_id,position,slot,block_type,model,enabled,params,scene_overrides)
             VALUES(?,?,?,?,?,?,?,?)""",
             (patch_id, pos, b.slot.strip(), b.block_type.strip(), b.model.strip(), int(b.enabled),
              knobs_json(b.params), json.dumps(b.scene_overrides) if b.scene_overrides else None),
@@ -1907,32 +2024,32 @@ def clean_scenes(scenes: list[str] | None) -> str:
     return json.dumps([str(s).strip()[:40] for s in (scenes or []) if str(s).strip()])
 
 
-def insert_patch(c, song_id: int, item: PatchIn, position: int) -> int:
+def insert_patch(c, owner_id: int, item: PatchIn, position: int, o: Owner = SONG) -> int:
     gear_id, name = gear_link(c, item.gear_id, None, item.gear_name)
     if not name:
         raise HTTPException(400, "Each patch needs a device or a device name")
     pid = c.execute(
-        """INSERT INTO song_device_patches(song_id,gear_id,gear_name,position,patch_ref,patch_name,scenes,midi,note)
+        f"""INSERT INTO {o.patches}({o.col},gear_id,gear_name,position,patch_ref,patch_name,scenes,midi,note)
         VALUES(?,?,?,?,?,?,?,?,?)""",
-        (song_id, gear_id, name, item.position if item.position is not None else position,
+        (owner_id, gear_id, name, item.position if item.position is not None else position,
          item.patch_ref.strip(), item.patch_name.strip(), clean_scenes(item.scenes),
          json.dumps(item.midi) if item.midi else None, item.note.strip()),
     ).lastrowid
     if item.blocks:
-        write_blocks(c, pid, item.blocks)
+        write_blocks(c, pid, item.blocks, o)
     return pid
 
 
-def replace_rig(c, song_id: int, rig: list[RigSettingIn]) -> None:
-    c.execute("DELETE FROM song_gear_settings WHERE song_id=?", (song_id,))
+def replace_rig(c, owner_id: int, rig: list[RigSettingIn], o: Owner = SONG) -> None:
+    c.execute(f"DELETE FROM {o.rig} WHERE {o.col}=?", (owner_id,))
     for pos, item in enumerate(rig):
-        insert_rig_setting(c, song_id, item, pos)
+        insert_rig_setting(c, owner_id, item, pos, o)
 
 
-def replace_patches(c, song_id: int, patches: list[PatchIn]) -> None:
-    c.execute("DELETE FROM song_device_patches WHERE song_id=?", (song_id,))
+def replace_patches(c, owner_id: int, patches: list[PatchIn], o: Owner = SONG) -> None:
+    c.execute(f"DELETE FROM {o.patches} WHERE {o.col}=?", (owner_id,))
     for pos, item in enumerate(patches):
-        insert_patch(c, song_id, item, pos)
+        insert_patch(c, owner_id, item, pos, o)
 
 
 def create_song(c, body: SongIn, user_id: int | None) -> int:
@@ -1953,6 +2070,8 @@ def create_song(c, body: SongIn, user_id: int | None) -> int:
         replace_rig(c, song_id, body.rig)
     if body.patches:
         replace_patches(c, song_id, body.patches)
+    if body.presets:
+        replace_song_presets(c, song_id, body.presets)
     return song_id
 
 
@@ -1960,6 +2079,7 @@ def update_song(c, row, body: SongPatch) -> None:
     data = body.model_dump(exclude_unset=True)
     rig = data.pop("rig", None)
     patches = data.pop("patches", None)
+    presets = data.pop("presets", None)
     cols = song_links(c, {k: data.pop(k) for k in ("guitar_id", "amp_id", "set_id") if k in data})
     for key in ("title", "artist", "tuning", "key", "notes"):
         if key in data:
@@ -1978,13 +2098,17 @@ def update_song(c, row, body: SongPatch) -> None:
         replace_rig(c, row["id"], body.rig)
     if patches is not None:
         replace_patches(c, row["id"], body.patches)
+    if presets is not None:
+        replace_song_presets(c, row["id"], body.presets)
 
 
 def touch_song(c, song_id: int) -> None:
     c.execute("UPDATE songs SET updated_at=? WHERE id=?", (now_iso(), song_id))
 
 
-def list_song_rows(c, q: str | None = None, gear_id: int | None = None) -> list[dict[str, Any]]:
+def list_song_rows(
+    c, q: str | None = None, gear_id: int | None = None, artist: str | None = None
+) -> list[dict[str, Any]]:
     sql = "SELECT * FROM songs"
     where, params = [], []
     if q:
@@ -1993,9 +2117,16 @@ def list_song_rows(c, q: str | None = None, gear_id: int | None = None) -> list[
     if gear_id is not None:
         where.append(
             """(guitar_id=? OR amp_id=? OR id IN (SELECT song_id FROM song_gear_settings WHERE gear_id=?)
-            OR id IN (SELECT song_id FROM song_device_patches WHERE gear_id=?))"""
+            OR id IN (SELECT song_id FROM song_device_patches WHERE gear_id=?)
+            OR id IN (SELECT sp.song_id FROM song_presets sp JOIN presets p ON p.id=sp.preset_id
+                      WHERE p.amp_id=?
+                      OR p.id IN (SELECT preset_id FROM preset_gear_settings WHERE gear_id=?)
+                      OR p.id IN (SELECT preset_id FROM preset_device_patches WHERE gear_id=?)))"""
         )
-        params += [gear_id] * 4
+        params += [gear_id] * 7
+    if artist is not None:
+        where.append("LOWER(TRIM(artist))=LOWER(TRIM(?))")
+        params.append(artist)
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY title COLLATE NOCASE, artist COLLATE NOCASE"
@@ -2146,6 +2277,282 @@ def set_song_cover(c, photo_id: int) -> dict[str, Any]:
     return {"ok": True}
 
 
+# ---------------------------------------------------------------- presets
+
+
+def get_preset_row(c, preset_id: int):
+    row = c.execute("SELECT * FROM presets WHERE id=?", (preset_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Preset not found")
+    return row
+
+
+def preset_song_count(c, preset_id: int) -> int:
+    return c.execute(
+        "SELECT COUNT(DISTINCT song_id) FROM song_presets WHERE preset_id=?", (preset_id,)
+    ).fetchone()[0]
+
+
+def preset_summary(c, row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "artist": row["artist"],
+        "amp_id": row["amp_id"],
+        "amp_name": row["amp_name"],
+        "notes": row["notes"],
+        "song_count": preset_song_count(c, row["id"]),
+        "added_by": display_user(c, row["created_by"]) or "System",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def preset_dict(c, row, with_songs: bool = True) -> dict[str, Any]:
+    out = preset_summary(c, row)
+    out["rig"], out["patches"] = chain_of(c, row["id"], PRESET)
+    if with_songs:
+        songs = c.execute(
+            """SELECT DISTINCT s.* FROM songs s JOIN song_presets sp ON sp.song_id=s.id
+            WHERE sp.preset_id=? ORDER BY s.title COLLATE NOCASE""",
+            (row["id"],),
+        ).fetchall()
+        out["songs"] = [{"id": s["id"], "title": s["title"], "artist": s["artist"]} for s in songs]
+    return out
+
+
+def song_preset_list(c, song_id: int) -> list[dict[str, Any]]:
+    """Presets used by a song, each with its full, current chain (a live link, not a copy)."""
+    rows = c.execute(
+        """SELECT sp.*, p.id AS pid FROM song_presets sp JOIN presets p ON p.id=sp.preset_id
+        WHERE sp.song_id=? ORDER BY sp.position, sp.id""",
+        (song_id,),
+    ).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "preset_id": r["preset_id"],
+            "label": r["label"],
+            "note": r["note"],
+            "position": r["position"],
+            "preset": preset_dict(c, get_preset_row(c, r["pid"]), with_songs=False),
+        }
+        for r in rows
+    ]
+
+
+def replace_song_presets(c, song_id: int, items: list[SongPresetIn]) -> None:
+    c.execute("DELETE FROM song_presets WHERE song_id=?", (song_id,))
+    for pos, item in enumerate(items):
+        get_preset_row(c, item.preset_id)
+        c.execute(
+            "INSERT INTO song_presets(song_id,preset_id,position,label,note) VALUES(?,?,?,?,?)",
+            (song_id, item.preset_id, pos, item.label.strip(), item.note.strip()),
+        )
+
+
+def list_preset_rows(c, q: str | None = None, artist: str | None = None) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM presets"
+    where, params = [], []
+    if q:
+        where.append("(name LIKE ? OR artist LIKE ?)")
+        params += [f"%{q}%", f"%{q}%"]
+    if artist is not None:
+        where.append("LOWER(TRIM(artist))=LOWER(TRIM(?))")
+        params.append(artist)
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY name COLLATE NOCASE"
+    return [preset_summary(c, r) for r in c.execute(sql, params)]
+
+
+def create_preset(c, body: PresetIn, user_id: int | None) -> int:
+    stamp = now_iso()
+    amp_id, amp_name = gear_link(c, body.amp_id, "amp")
+    preset_id = c.execute(
+        """INSERT INTO presets(name,artist,amp_id,amp_name,notes,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?)""",
+        (body.name.strip(), body.artist.strip(), amp_id, amp_name, body.notes.strip(), user_id, stamp, stamp),
+    ).lastrowid
+    if body.rig:
+        replace_rig(c, preset_id, body.rig, PRESET)
+    if body.patches:
+        replace_patches(c, preset_id, body.patches, PRESET)
+    return preset_id
+
+
+def update_preset(c, row, body: PresetPatch) -> None:
+    data = body.model_dump(exclude_unset=True)
+    cols: dict[str, Any] = {}
+    if "name" in data:
+        if not (data["name"] or "").strip():
+            raise HTTPException(400, "Name is required")
+        cols["name"] = data["name"].strip()
+    for key in ("artist", "notes"):
+        if key in data:
+            cols[key] = (data[key] or "").strip()
+    if "amp_id" in data:
+        cols["amp_id"], name = gear_link(c, data["amp_id"], "amp")
+        if data["amp_id"] is not None:
+            cols["amp_name"] = name
+    cols["updated_at"] = now_iso()
+    sql = ", ".join(f"{k}=?" for k in cols)
+    c.execute(f"UPDATE presets SET {sql} WHERE id=?", (*cols.values(), row["id"]))
+    if body.rig is not None:
+        replace_rig(c, row["id"], body.rig, PRESET)
+    if body.patches is not None:
+        replace_patches(c, row["id"], body.patches, PRESET)
+
+
+def copy_chain(c, src_id: int, src: Owner, dst_id: int, dst: Owner) -> None:
+    """Append one chain (rig + patches) onto another, as independent rows."""
+    rig, patches = chain_of(c, src_id, src)
+    top = c.execute(f"SELECT COALESCE(MAX(position), -1) + 1 FROM {dst.rig} WHERE {dst.col}=?", (dst_id,)).fetchone()[0]
+    for i, r in enumerate(rig):
+        item = RigSettingIn(gear_name=r["gear_name"], engaged=r["engaged"], note=r["note"],
+                            knobs=[Knob(**k) for k in r["knobs"]])
+        item.gear_id = r["gear_id"]
+        insert_rig_setting(c, dst_id, item, top + i, dst)
+    top = c.execute(
+        f"SELECT COALESCE(MAX(position), -1) + 1 FROM {dst.patches} WHERE {dst.col}=?", (dst_id,)
+    ).fetchone()[0]
+    for i, p in enumerate(patches):
+        blocks = [
+            EffectBlockIn(slot=b["slot"], block_type=b["block_type"], model=b["model"], enabled=b["enabled"],
+                          params=[Knob(**k) for k in b["params"]], scene_overrides=b["scene_overrides"])
+            for b in p["blocks"]
+        ]
+        item = PatchIn(gear_id=p["gear_id"], gear_name=p["gear_name"], patch_ref=p["patch_ref"],
+                       patch_name=p["patch_name"], scenes=p["scenes"], midi=p["midi"], note=p["note"],
+                       blocks=blocks)
+        insert_patch(c, dst_id, item, top + i, dst)
+
+
+def save_song_as_preset(c, song_row, body: SaveAsPresetIn, user_id: int | None) -> dict[str, Any]:
+    stamp = now_iso()
+    song_id = song_row["id"]
+    preset_id = c.execute(
+        """INSERT INTO presets(name,artist,amp_id,amp_name,notes,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?)""",
+        (body.name.strip(), song_row["artist"], song_row["amp_id"], song_row["amp_name"], "", user_id, stamp, stamp),
+    ).lastrowid
+    copy_chain(c, song_id, SONG, preset_id, PRESET)
+    if body.use_in_song:
+        # the song now points at the preset instead of keeping its own copy
+        c.execute("DELETE FROM song_gear_settings WHERE song_id=?", (song_id,))
+        c.execute("DELETE FROM song_device_patches WHERE song_id=?", (song_id,))
+        top = c.execute(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM song_presets WHERE song_id=?", (song_id,)
+        ).fetchone()[0]
+        c.execute(
+            "INSERT INTO song_presets(song_id,preset_id,position,label,note) VALUES(?,?,?,?,?)",
+            (song_id, preset_id, top, "", ""),
+        )
+        touch_song(c, song_id)
+    return preset_dict(c, get_preset_row(c, preset_id))
+
+
+def unlink_preset_to_copy(c, song_id: int, link_id: int) -> dict[str, Any]:
+    get_song_row(c, song_id)
+    link = c.execute("SELECT * FROM song_presets WHERE id=? AND song_id=?", (link_id, song_id)).fetchone()
+    if not link:
+        raise HTTPException(404, "This song doesn't use that preset")
+    copy_chain(c, link["preset_id"], PRESET, song_id, SONG)
+    c.execute("DELETE FROM song_presets WHERE id=?", (link_id,))
+    touch_song(c, song_id)
+    return song_dict(c, get_song_row(c, song_id))
+
+
+def artist_groups(c) -> list[dict[str, Any]]:
+    """Songs and presets grouped by artist, ignoring case and stray spaces."""
+    groups: dict[str, dict[str, Any]] = {}
+
+    def group(name: str) -> dict[str, Any]:
+        tidy = " ".join(name.split())
+        key = tidy.lower()
+        if key not in groups:
+            groups[key] = {"artist": tidy, "songs": [], "presets": []}
+        elif groups[key]["artist"].islower() and not tidy.islower():
+            groups[key]["artist"] = tidy  # prefer "AC/DC" over "ac/dc" for the heading
+        return groups[key]
+
+    for s in list_song_rows(c):
+        group(s["artist"])["songs"].append(s)
+    for p in list_preset_rows(c):
+        group(p["artist"])["presets"].append(p)
+    named = sorted((g for k, g in groups.items() if k), key=lambda g: g["artist"].lower())
+    for g in named:
+        g["song_count"], g["preset_count"] = len(g["songs"]), len(g["presets"])
+    if "" in groups:
+        blank = groups[""]
+        blank["song_count"], blank["preset_count"] = len(blank["songs"]), len(blank["presets"])
+        named.append(blank)
+    return named
+
+
+def register_preset_routes(prefix: str, auth, v1: bool) -> None:
+    """Preset and artist routes for the web app (session cookie) and the token API (/api/v1)."""
+    extra: dict[str, Any] = {"tags": ["v1"]} if v1 else {"include_in_schema": False}
+    tag = "v1_" if v1 else ""
+
+    def route(method: str, path: str, summary: str, **kw):
+        return getattr(app, method)(prefix + path, summary=summary, name=f"{tag}{method}_{path}", **extra, **kw)
+
+    @route("get", "/presets", "List presets (filter by name/artist with q, or an exact artist)")
+    def _list(request: Request, q: str | None = None, artist: str | None = None):
+        auth(request)
+        with db() as c:
+            return list_preset_rows(c, q, artist)
+
+    @route("post", "/presets", "Add a preset: a named tone with its rig settings and patches", status_code=201)
+    def _add(body: PresetIn, request: Request):
+        user = auth(request)
+        with db() as c:
+            return preset_dict(c, get_preset_row(c, create_preset(c, body, user["id"])))
+
+    @route("get", "/presets/{preset_id}", "Get one preset with its chain and the songs that use it")
+    def _get(preset_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            return preset_dict(c, get_preset_row(c, preset_id))
+
+    @route("patch", "/presets/{preset_id}",
+           "Update a preset; every song using it sees the change. Sending rig or patches replaces that list")
+    def _patch(preset_id: int, body: PresetPatch, request: Request):
+        auth(request)
+        with db() as c:
+            update_preset(c, get_preset_row(c, preset_id), body)
+            return preset_dict(c, get_preset_row(c, preset_id))
+
+    @route("delete", "/presets/{preset_id}", "Delete a preset (songs using it just lose the link)")
+    def _delete(preset_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            get_preset_row(c, preset_id)
+            c.execute("DELETE FROM presets WHERE id=?", (preset_id,))
+            return {"ok": True}
+
+    @route("post", "/songs/{song_id}/save-as-preset",
+           "Save a song's chain as a new preset; use_in_song swaps the song over to the preset", status_code=201)
+    def _save_as(song_id: int, body: SaveAsPresetIn, request: Request):
+        user = auth(request)
+        with db() as c:
+            return save_song_as_preset(c, get_song_row(c, song_id), body, user["id"])
+
+    @route("post", "/songs/{song_id}/presets/{link_id}/copy",
+           "Stop using a preset in this song and keep an editable copy of its chain instead")
+    def _copy(song_id: int, link_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            return unlink_preset_to_copy(c, song_id, link_id)
+
+    @route("get", "/artists", "Songs and presets grouped by artist")
+    def _artists(request: Request):
+        auth(request)
+        with db() as c:
+            return artist_groups(c)
+
+
 def session_user(request: Request) -> sqlite3.Row:
     return current_user(request)
 
@@ -2162,11 +2569,11 @@ def register_song_routes(prefix: str, auth, v1: bool) -> None:
     def route(method: str, path: str, summary: str, **kw):
         return getattr(app, method)(prefix + path, summary=summary, name=f"{tag}{method}_{path}", **extra, **kw)
 
-    @route("get", "/songs", "List songs (filter by title/artist with q, or by gear_id)")
-    def _list(request: Request, q: str | None = None, gear_id: int | None = None):
+    @route("get", "/songs", "List songs (filter by title/artist with q, an exact artist, or gear_id)")
+    def _list(request: Request, q: str | None = None, gear_id: int | None = None, artist: str | None = None):
         auth(request)
         with db() as c:
-            return list_song_rows(c, q, gear_id)
+            return list_song_rows(c, q, gear_id, artist)
 
     @route("post", "/songs", "Add a song, optionally with its rig settings and device patches", status_code=201)
     def _add(body: SongIn, request: Request):
@@ -2256,6 +2663,8 @@ register_song_routes("/api", session_user, v1=False)
 register_song_routes("/api/v1", token_user, v1=True)
 register_share_routes("/api", session_user, v1=False)
 register_share_routes("/api/v1", token_user, v1=True)
+register_preset_routes("/api", session_user, v1=False)
+register_preset_routes("/api/v1", token_user, v1=True)
 
 
 @app.get("/api/song-options")

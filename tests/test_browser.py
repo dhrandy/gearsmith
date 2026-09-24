@@ -78,7 +78,8 @@ def test_main_screens(app_url, width, height):
 
         # Sets page shows the seeded set with members
         page.get_by_role("link", name="Sets", exact=True).click()
-        expect(page.get_by_text("Practice board")).to_be_visible()
+        expect(page.get_by_role("heading", name="Sets", exact=True)).to_be_visible()
+        expect(page.locator(".set-card", has_text="Practice board")).to_be_visible()
         expect(page.locator(".set-member").first).to_be_visible()
 
         # Settings: hide the picks section, it leaves the gear list
@@ -164,4 +165,74 @@ def test_token_create_shows_value_once_and_revoke(app_url, width, height):
         expect(page.get_by_role("heading", name="API tokens")).to_be_visible()
         expect(page.locator("#token-value")).to_have_count(0)
         assert token2 not in page.content()
+        browser.close()
+
+
+# Checks every element that carries user text: it must stay inside its card/row and the page
+# must never scroll sideways. Returns a list of offenders so a failure says what broke.
+OVERFLOW_JS = """() => {
+  const out = [];
+  const vw = document.documentElement.clientWidth;
+  if (document.documentElement.scrollWidth > vw + 1) out.push(`page scrolls sideways: ${document.documentElement.scrollWidth} > ${vw}`);
+  const boxes = '.gear-card, .set-card, .set-member, .set-chip, .due, .list-row, .restring-row, .fact, .card';
+  document.querySelectorAll('#view ' + boxes.split(', ').join(', #view ')).forEach((box) => {
+    const b = box.getBoundingClientRect();
+    if (b.right > vw + 1) out.push(`${box.className} runs past the viewport (${Math.round(b.right)} > ${vw})`);
+    box.querySelectorAll('*').forEach((el) => {
+      const r = el.getBoundingClientRect();
+      if (!r.width || el.closest(boxes) !== box) return;
+      if (r.right > b.right + 1) out.push(`${el.className || el.tagName} runs out of ${box.className}: "${el.textContent.trim().slice(0, 40)}"`);
+    });
+  });
+  return out;
+}"""
+
+LONG_WORD = "Supercalifragilisticexpialidociousoverdriveunit"
+
+
+def assert_no_overflow(page, where):
+    page.wait_for_timeout(300)
+    problems = page.evaluate(OVERFLOW_JS)
+    assert problems == [], f"{where}: {problems}"
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_long_text_truncates_or_wraps_inside_cards(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        amp = req.post(app_url + "/api/gear", data={
+            "type": "amp", "name": "Bassbreaker " + LONG_WORD,
+            "make": "Fender Musical Instruments Corporation", "model": "Bassbreaker 15 Combo Limited Edition Tweed",
+            "notes": LONG_WORD * 3,
+        }).json()
+        gtr = req.post(app_url + "/api/gear", data={
+            "type": "guitar", "name": "Overdue " + LONG_WORD, "make": "Positive Grid",
+            "model": "HT Studio 20 (Venue Edition) Extra Long Model", "restring_interval_days": 30,
+        }).json()
+        old = page.evaluate("() => new Date(Date.now() - 60 * 864e5).toISOString().slice(0, 10)")
+        assert req.post(app_url + f"/api/gear/{gtr['id']}/restrings", data={
+            "brand": "Ernie Ball " + LONG_WORD, "gauge": "10-46", "date": old, "note": "note " + LONG_WORD,
+        }).ok
+        assert req.post(app_url + "/api/sets", data={
+            "name": "Gig rig " + LONG_WORD, "notes": "Notes " + LONG_WORD, "item_ids": [amp["id"], gtr["id"]],
+        }).ok
+        assert req.post(app_url + "/api/tokens", data={"name": "token-" + LONG_WORD}).ok
+
+        # Gear list: make/model subtitle is clipped with an ellipsis, full text kept in the tooltip
+        page.goto(app_url + "/#/")
+        meta = page.locator(".gear-card .gc-meta", has_text="Fender Musical")
+        expect(meta).to_be_visible()
+        expect(meta).to_have_attribute("title", re.compile("Bassbreaker 15 Combo Limited Edition Tweed"))
+        clipped = meta.evaluate("el => ({ css: getComputedStyle(el).textOverflow, over: el.scrollWidth > el.clientWidth })")
+        assert clipped == {"css": "ellipsis", "over": True}
+        assert_no_overflow(page, "gear list")
+
+        for route in [f"#/gear/{amp['id']}", f"#/gear/{gtr['id']}", "#/sets", "#/due", "#/settings"]:
+            page.goto(app_url + "/" + route)
+            page.locator("#view h1").first.wait_for()
+            assert_no_overflow(page, route)
+
         browser.close()

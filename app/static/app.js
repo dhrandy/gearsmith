@@ -155,9 +155,18 @@ function route() {
     tab = "songs";
     if (!featureOn("feature_songs")) location.hash = "#/";
     else if (parts[1] === "new") songEditorView(null);
+    else if (parts[1] === "artists") artistsView();
     else if (parts[1] && parts[2] === "edit") songEditorView(Number(parts[1]));
     else if (parts[1]) songDetailView(Number(parts[1]));
     else songsView();
+  }
+  else if (parts[0] === "presets") {
+    tab = "songs";
+    if (!featureOn("feature_songs")) location.hash = "#/";
+    else if (parts[1] === "new") songEditorView(null, "preset");
+    else if (parts[1] && parts[2] === "edit") songEditorView(Number(parts[1]), "preset");
+    else if (parts[1]) presetDetailView(Number(parts[1]));
+    else presetsView();
   }
   else if (parts[0] === "sets") { tab = "sets"; featureOn("feature_sets") ? setsView() : (location.hash = "#/"); }
   else if (parts[0] === "due") { tab = "due"; featureOn("feature_maintenance") ? dueView() : (location.hash = "#/"); }
@@ -855,6 +864,44 @@ function songChips(s) {
   ].join("");
 }
 
+const SONG_VIEWS = [
+  ["songs", "Songs", "#/songs"],
+  ["artists", "Artists", "#/songs/artists"],
+  ["presets", "Presets", "#/presets"],
+];
+
+function songsNav(current) {
+  return `<nav class="seg" aria-label="Songs, artists and presets">
+    ${SONG_VIEWS.map(([key, label, href]) => `<a href="${href}" class="${key === current ? "on" : ""}" ${key === current ? 'aria-current="page"' : ""}>${label}</a>`).join("")}
+  </nav>`;
+}
+
+function songCard(s) {
+  const presets = s.preset_names || [];
+  return `
+      <a class="gear-card song-card" href="#/songs/${s.id}">
+        <span class="thumb">${s.cover ? `<img src="${s.cover}" alt="" />` : "♪"}</span>
+        <span class="gc-body">
+          <span class="gc-name" title="${esc(s.title)}">${esc(s.title)}</span>
+          <span class="gc-meta" title="${esc(s.artist)}">${esc(s.artist) || "&nbsp;"}</span>
+          <span class="gc-foot">${songChips(s)}${s.guitar_name ? `<span class="badge">🎸 ${esc(s.guitar_name)}</span>` : ""}${presets.length ? `<span class="badge preset-badge" title="${esc(presets.join(", "))}">🎚️ ${esc(presets.join(", "))}</span>` : ""}</span>
+        </span>
+      </a>`;
+}
+
+function presetCard(p) {
+  const used = p.song_count === 0 ? "Not used yet" : p.song_count === 1 ? "Used in 1 song" : `Used in ${p.song_count} songs`;
+  return `
+      <a class="gear-card song-card preset-card" href="#/presets/${p.id}">
+        <span class="thumb">🎚️</span>
+        <span class="gc-body">
+          <span class="gc-name" title="${esc(p.name)}">${esc(p.name)}</span>
+          <span class="gc-meta" title="${esc(p.artist)}">${esc(p.artist) || "&nbsp;"}</span>
+          <span class="gc-foot">${p.amp_name ? `<span class="badge">🔊 ${esc(p.amp_name)}</span>` : ""}<span class="chip">${used}</span></span>
+        </span>
+      </a>`;
+}
+
 async function songsView() {
   const songs = await api("/api/songs");
   view.innerHTML = `
@@ -862,6 +909,7 @@ async function songsView() {
       <h1>Songs</h1>
       <a class="btn primary" href="#/songs/new">Add song</a>
     </div>
+    ${songsNav("songs")}
     <p class="muted">Your rig and tone for each song: which guitar and amp, where every knob sits, and which patch and scene on a modeler.</p>
     <div class="toolbar"><input type="search" id="song-search" placeholder="Filter by title or artist..." /></div>
     <div class="grid" id="song-list"></div>`;
@@ -870,15 +918,7 @@ async function songsView() {
   function render() {
     const needle = search.value.trim().toLowerCase();
     const shown = songs.filter((s) => !needle || `${s.title} ${s.artist}`.toLowerCase().includes(needle));
-    list.innerHTML = shown.map((s) => `
-      <a class="gear-card song-card" href="#/songs/${s.id}">
-        <span class="thumb">${s.cover ? `<img src="${s.cover}" alt="" />` : "♪"}</span>
-        <span class="gc-body">
-          <span class="gc-name" title="${esc(s.title)}">${esc(s.title)}</span>
-          <span class="gc-meta" title="${esc(s.artist)}">${esc(s.artist) || "&nbsp;"}</span>
-          <span class="gc-foot">${songChips(s)}${s.guitar_name ? `<span class="badge">🎸 ${esc(s.guitar_name)}</span>` : ""}</span>
-        </span>
-      </a>`).join("") || `<p class="empty">${songs.length ? "Nothing matches." : "No songs yet. Add one to save its rig and settings."}</p>`;
+    list.innerHTML = shown.map(songCard).join("") || `<p class="empty">${songs.length ? "Nothing matches." : "No songs yet. Add one to save its rig and settings."}</p>`;
   }
   render();
   search.addEventListener("input", render);
@@ -888,28 +928,11 @@ function knobText(knobs) {
   return knobs.filter((k) => k.name).map((k) => `<span class="knob"><span>${esc(k.name)}</span>${esc(k.value || "-")}</span>`).join("");
 }
 
-async function songDetailView(id) {
-  const s = await api(`/api/songs/${id}`);
-  const gearLink = (gid, name) => (gid ? `<a href="#/gear/${gid}">${esc(name)}</a>` : esc(name));
-  const rigFacts = [
-    ["Guitar", s.guitar_name ? gearLink(s.guitar_id, s.guitar_name) : ""],
-    ["Amp", s.amp_name ? gearLink(s.amp_id, s.amp_name) : ""],
-    ["Set", s.set_name && featureOn("feature_sets") ? esc(s.set_name) : ""],
-  ].filter(([, v]) => v);
-  view.innerHTML = `
-    <div class="pagehead">
-      <h1>${esc(s.title)}</h1>
-      <div class="row">
-        <a class="btn small" href="#/songs/${s.id}/edit">Edit</a>
-        <button class="small danger" id="sd-delete" type="button">Delete</button>
-      </div>
-    </div>
-    ${s.artist ? `<p class="muted wrap-any" style="margin-top:0">${esc(s.artist)}</p>` : ""}
-    <div class="chips">${songChips(s)}</div>
-    ${rigFacts.length ? `<div class="facts recall-facts">${rigFacts.map(([k, v]) => `<div class="fact"><span>${k}</span>${v}</div>`).join("")}</div>` : ""}
-    <h2>Signal chain</h2>
-    ${s.rig.length ? `<ol class="chain">
-      ${s.rig.map((r) => `
+const gearLink = (gid, name) => (gid ? `<a href="#/gear/${gid}">${esc(name)}</a>` : esc(name));
+
+function chainHtml(rig) {
+  return `<ol class="chain">
+      ${rig.map((r) => `
         <li class="chain-item${r.engaged === "off" ? " off" : ""}">
           <div class="chain-head">
             <strong class="wrap-any">${gearLink(r.gear_id, r.gear_name)}</strong>
@@ -918,11 +941,12 @@ async function songDetailView(id) {
           ${r.knobs.length ? `<div class="knobs">${knobText(r.knobs)}</div>` : ""}
           ${r.note ? `<p class="notes muted">${esc(r.note)}</p>` : ""}
         </li>`).join("")}
-    </ol>` : `<p class="muted">No gear settings saved for this song.</p>`}
-    ${s.patches.length ? `
-    <h2>Patches</h2>
-    <div class="stack">
-      ${s.patches.map((p) => `
+    </ol>`;
+}
+
+function patchesHtml(patches) {
+  return `<div class="stack">
+      ${patches.map((p) => `
         <div class="card patch-card">
           <div class="chain-head">
             <span class="wrap-any"><strong>${gearLink(p.gear_id, p.gear_name)}</strong></span>
@@ -937,7 +961,141 @@ async function songDetailView(id) {
             </div>`).join("")}</div>` : ""}
           ${p.note ? `<p class="notes muted">${esc(p.note)}</p>` : ""}
         </div>`).join("")}
+    </div>`;
+}
+
+async function artistsView() {
+  const groups = await api("/api/artists");
+  view.innerHTML = `
+    <div class="pagehead">
+      <h1>Artists</h1>
+      <a class="btn primary" href="#/songs/new">Add song</a>
+    </div>
+    ${songsNav("artists")}
+    <p class="muted">Your songs and presets grouped by the artist field.</p>
+    <div class="toolbar"><input type="search" id="artist-search" placeholder="Filter by artist..." /></div>
+    <div id="artist-list"></div>`;
+  const list = document.getElementById("artist-list");
+  const search = document.getElementById("artist-search");
+  function render() {
+    const needle = search.value.trim().toLowerCase();
+    const shown = groups.filter((g) => !needle || g.artist.toLowerCase().includes(needle));
+    list.innerHTML = shown.map((g) => {
+      const counts = [
+        g.song_count ? (g.song_count === 1 ? "1 song" : `${g.song_count} songs`) : "",
+        g.preset_count ? (g.preset_count === 1 ? "1 preset" : `${g.preset_count} presets`) : "",
+      ].filter(Boolean).join(" · ");
+      return `
+      <section class="artist-group">
+        <h2 class="wrap-any">${g.artist ? esc(g.artist) : "No artist"} <span class="muted count">${counts}</span></h2>
+        <div class="grid">${g.songs.map(songCard).join("")}${g.presets.map(presetCard).join("")}</div>
+      </section>`;
+    }).join("") || `<p class="empty">${groups.length ? "Nothing matches." : "No songs yet. Add one with an artist and it shows up here."}</p>`;
+  }
+  render();
+  search.addEventListener("input", render);
+}
+
+async function presetsView() {
+  const presets = await api("/api/presets");
+  view.innerHTML = `
+    <div class="pagehead">
+      <h1>Presets</h1>
+      <a class="btn primary" href="#/presets/new">Add preset</a>
+    </div>
+    ${songsNav("presets")}
+    <p class="muted">A preset is a named tone saved once: the chain, knob settings and patches. Use it in any song, and when you change the preset every song using it follows.</p>
+    <div class="toolbar"><input type="search" id="preset-search" placeholder="Filter by name or artist..." /></div>
+    <div class="grid" id="preset-list"></div>`;
+  const list = document.getElementById("preset-list");
+  const search = document.getElementById("preset-search");
+  function render() {
+    const needle = search.value.trim().toLowerCase();
+    const shown = presets.filter((p) => !needle || `${p.name} ${p.artist}`.toLowerCase().includes(needle));
+    list.innerHTML = shown.map(presetCard).join("") ||
+      `<p class="empty">${presets.length ? "Nothing matches." : "No presets yet. Add one here, or open a song and save its chain as a preset."}</p>`;
+  }
+  render();
+  search.addEventListener("input", render);
+}
+
+async function presetDetailView(id) {
+  const p = await api(`/api/presets/${id}`);
+  view.innerHTML = `
+    <div class="pagehead">
+      <h1>${esc(p.name)}</h1>
+      <div class="row">
+        <a class="btn small" href="#/presets/${p.id}/edit">Edit</a>
+        <button class="small danger" id="pd-delete" type="button">Delete</button>
+      </div>
+    </div>
+    ${p.artist ? `<p class="muted wrap-any" style="margin-top:0">${esc(p.artist)}</p>` : ""}
+    ${p.amp_name ? `<div class="facts recall-facts"><div class="fact"><span>Amp</span>${gearLink(p.amp_id, p.amp_name)}</div></div>` : ""}
+    <h2>Signal chain</h2>
+    ${p.rig.length ? chainHtml(p.rig) : `<p class="muted">No gear settings in this preset.</p>`}
+    ${p.patches.length ? `<h2>Patches</h2>${patchesHtml(p.patches)}` : ""}
+    ${p.notes ? `<h2>Notes</h2><p class="notes wrap-any">${esc(p.notes)}</p>` : ""}
+    <h2>Used in</h2>
+    <div id="pd-songs">${p.songs.length
+      ? `<div class="set-chips">${p.songs.map((s) => `<a class="set-chip link-chip" href="#/songs/${s.id}" title="${esc(s.title)}">${esc(s.title)}${s.artist ? ` <span class="muted">${esc(s.artist)}</span>` : ""}</a>`).join("")}</div>
+         <p class="hint">Changes to this preset show up in all of these songs.</p>`
+      : `<span class="muted">No songs use this preset yet. Pick it in a song's editor.</span>`}</div>`;
+  document.getElementById("pd-delete").addEventListener("click", () => {
+    const used = p.songs.length ? ` ${p.songs.length === 1 ? "1 song uses" : p.songs.length + " songs use"} it and will lose these settings.` : "";
+    openSheet(`
+      <h2>Delete ${esc(p.name)}?</h2>
+      <p class="muted">This removes the preset.${used} The gear stays.</p>
+      <div class="sheet-actions">
+        <button type="button" id="del-cancel">Cancel</button>
+        <button class="primary danger" id="del-confirm" type="button">Delete</button>
+      </div>`);
+    document.getElementById("del-cancel").addEventListener("click", closeSheet);
+    document.getElementById("del-confirm").addEventListener("click", async () => {
+      await api(`/api/presets/${id}`, { method: "DELETE" });
+      closeSheet();
+      toast("Preset deleted");
+      location.hash = "#/presets";
+    });
+  });
+}
+
+async function songDetailView(id) {
+  const s = await api(`/api/songs/${id}`);
+  const rigFacts = [
+    ["Guitar", s.guitar_name ? gearLink(s.guitar_id, s.guitar_name) : ""],
+    ["Amp", s.amp_name ? gearLink(s.amp_id, s.amp_name) : ""],
+    ["Set", s.set_name && featureOn("feature_sets") ? esc(s.set_name) : ""],
+  ].filter(([, v]) => v);
+  view.innerHTML = `
+    <div class="pagehead">
+      <h1>${esc(s.title)}</h1>
+      <div class="row">
+        <a class="btn small" href="#/songs/${s.id}/edit">Edit</a>
+        ${s.rig.length || s.patches.length ? `<button class="small" id="sd-save-preset" type="button">Save as preset</button>` : ""}
+        <button class="small danger" id="sd-delete" type="button">Delete</button>
+      </div>
+    </div>
+    ${s.artist ? `<p class="muted wrap-any" style="margin-top:0">${esc(s.artist)}</p>` : ""}
+    <div class="chips">${songChips(s)}</div>
+    ${rigFacts.length ? `<div class="facts recall-facts">${rigFacts.map(([k, v]) => `<div class="fact"><span>${k}</span>${v}</div>`).join("")}</div>` : ""}
+    ${s.presets.length ? `
+    <h2>Presets</h2>
+    <div class="stack">
+      ${s.presets.map((link) => `
+        <div class="card preset-use">
+          <div class="chain-head">
+            <span class="wrap-any">${link.label ? `<span class="patch-ref">${esc(link.label)}</span> ` : ""}<strong><a href="#/presets/${link.preset.id}">${esc(link.preset.name)}</a></strong></span>
+            <button class="small ghost" type="button" data-copy-preset="${link.id}">Copy into song</button>
+          </div>
+          ${link.note ? `<p class="notes muted">${esc(link.note)}</p>` : ""}
+          ${link.preset.amp_name ? `<p class="muted" style="margin:6px 0 0">Amp: ${gearLink(link.preset.amp_id, link.preset.amp_name)}</p>` : ""}
+          ${link.preset.rig.length ? chainHtml(link.preset.rig) : ""}
+          ${link.preset.patches.length ? patchesHtml(link.preset.patches) : ""}
+        </div>`).join("")}
     </div>` : ""}
+    ${s.rig.length || !s.presets.length ? `<h2>${s.presets.length ? "Song's own settings" : "Signal chain"}</h2>` : ""}
+    ${s.rig.length ? chainHtml(s.rig) : (s.presets.length ? "" : `<p class="muted">No gear settings saved for this song.</p>`)}
+    ${s.patches.length ? `<h2>Patches</h2>${patchesHtml(s.patches)}` : ""}
     ${s.notes ? `<h2>Notes</h2><p class="notes wrap-any">${esc(s.notes)}</p>` : ""}
     <h2>Photos</h2>
     <div class="card">
@@ -973,6 +1131,50 @@ async function songDetailView(id) {
       location.hash = "#/songs";
     });
   });
+  const saveBtn = document.getElementById("sd-save-preset");
+  if (saveBtn) saveBtn.addEventListener("click", () => {
+    openSheet(`
+      <h2>Save as preset</h2>
+      <form id="sp-form" class="stack">
+        <div><label for="sp-name">Preset name</label><input id="sp-name" required maxlength="120" value="${esc(s.title)}" /></div>
+        <label class="toggle"><input type="checkbox" id="sp-use" checked /> Use the preset in this song, so changes to it show up here</label>
+        <p class="hint">Saves this song's chain, knob settings and patches as a preset you can pick in other songs.</p>
+        <p class="error" id="sp-error"></p>
+        <div class="sheet-actions">
+          <button type="button" id="sp-cancel">Cancel</button>
+          <button class="primary" type="submit">Save preset</button>
+        </div>
+      </form>`);
+    document.getElementById("sp-cancel").addEventListener("click", closeSheet);
+    document.getElementById("sp-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      try {
+        await api(`/api/songs/${id}/save-as-preset`, {
+          method: "POST",
+          body: { name: document.getElementById("sp-name").value, use_in_song: document.getElementById("sp-use").checked },
+        });
+        closeSheet();
+        toast("Preset saved");
+        songDetailView(id);
+      } catch (ex) { document.getElementById("sp-error").textContent = ex.message; }
+    });
+  });
+  view.querySelectorAll("[data-copy-preset]").forEach((b) => b.addEventListener("click", () => {
+    openSheet(`
+      <h2>Copy the preset into this song?</h2>
+      <p class="muted">The song gets its own copy of the settings to tweak, and stops following the preset. The preset itself doesn't change.</p>
+      <div class="sheet-actions">
+        <button type="button" id="cp-cancel">Cancel</button>
+        <button class="primary" id="cp-confirm" type="button">Copy into song</button>
+      </div>`);
+    document.getElementById("cp-cancel").addEventListener("click", closeSheet);
+    document.getElementById("cp-confirm").addEventListener("click", async () => {
+      await api(`/api/songs/${id}/presets/${b.dataset.copyPreset}/copy`, { method: "POST" });
+      closeSheet();
+      toast("Copied into the song");
+      songDetailView(id);
+    });
+  }));
   document.getElementById("song-photo-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const file = document.getElementById("song-photo-file").files[0];
@@ -1001,12 +1203,16 @@ function knobsFromControls(g) {
   return controls.map((c) => ({ name: c.name, value: "", kind: c.kind }));
 }
 
-async function songEditorView(id) {
-  const [song, gear, sets, opts] = await Promise.all([
-    id ? api(`/api/songs/${id}`) : Promise.resolve(null),
+/* One editor for songs and presets: both are a signal chain plus patches. */
+async function songEditorView(id, kind = "song") {
+  const isPreset = kind === "preset";
+  const base = isPreset ? "presets" : "songs";
+  const [song, gear, sets, opts, allPresets] = await Promise.all([
+    id ? api(`/api/${base}/${id}`) : Promise.resolve(null),
     api("/api/gear?lifecycle=owned"),
-    featureOn("feature_sets") ? api("/api/sets") : Promise.resolve([]),
+    featureOn("feature_sets") && !isPreset ? api("/api/sets") : Promise.resolve([]),
     tuningSuggestions ? Promise.resolve({ tunings: tuningSuggestions }) : api("/api/song-options"),
+    isPreset ? Promise.resolve([]) : api("/api/presets"),
   ]);
   tuningSuggestions = opts.tunings;
   const byId = new Map(gear.map((g) => [g.id, g]));
@@ -1016,8 +1222,10 @@ async function songEditorView(id) {
     return c ? c.kind : "knob";
   };
   const draft = song ? {
-    title: song.title, artist: song.artist, tuning: song.tuning, capo: song.capo ?? "", key: song.key,
-    bpm: song.bpm ?? "", guitar_id: song.guitar_id, amp_id: song.amp_id, set_id: song.set_id, notes: song.notes,
+    title: song.title || "", name: song.name || "", artist: song.artist, tuning: song.tuning || "", capo: song.capo ?? "",
+    key: song.key || "", bpm: song.bpm ?? "", guitar_id: song.guitar_id ?? null, amp_id: song.amp_id,
+    set_id: song.set_id ?? null, notes: song.notes,
+    presets: (song.presets || []).map((l) => ({ preset_id: l.preset_id, label: l.label, note: l.note, name: l.preset.name })),
     rig: song.rig.map((r) => ({
       gear_id: r.gear_id, gear_name: r.gear_name, engaged: r.engaged, note: r.note,
       knobs: r.knobs.map((k) => ({ ...k, kind: kindOf(r.gear_id, k.name) })),
@@ -1029,8 +1237,8 @@ async function songEditorView(id) {
       showBlocks: p.blocks.length > 0,
     })),
   } : {
-    title: "", artist: "", tuning: "", capo: "", key: "", bpm: "", guitar_id: null, amp_id: null, set_id: null,
-    notes: "", rig: [], patches: [],
+    title: "", name: "", artist: "", tuning: "", capo: "", key: "", bpm: "", guitar_id: null, amp_id: null, set_id: null,
+    notes: "", presets: [], rig: [], patches: [],
   };
   const guitars = gear.filter((g) => g.type === "guitar");
   const amps = gear.filter((g) => g.type === "amp");
@@ -1057,10 +1265,53 @@ async function songEditorView(id) {
       </div>`).join("");
   }
 
+  function presetFields() {
+    return `
+        <div class="card stack">
+          <div class="form-grid">
+            <div><label for="sg-name">Preset name</label><input id="sg-name" data-f="name" required maxlength="120" value="${esc(draft.name)}" placeholder="e.g. Classic crunch" /></div>
+            <div><label for="sg-artist">Artist (optional)</label><input id="sg-artist" data-f="artist" maxlength="120" value="${esc(draft.artist)}" /></div>
+            <div><label for="sg-amp">Amp</label>
+              <select id="sg-amp"><option value="">None</option>${gearOptions(amps, draft.amp_id, song && song.amp_name)}</select></div>
+          </div>
+        </div>`;
+  }
+
+  function presetPicker() {
+    return `
+        <h2>Presets</h2>
+        <p class="hint" style="margin-top:-6px">Saved tones this song uses. They stay linked: edit the preset and this song follows. Add a label like "Verse" or "Solo" if the song switches tones.</p>
+        <div class="stack" id="preset-rows">
+          ${draft.presets.map((l, i) => `
+            <div class="card rig-row">
+              <div class="rig-head">
+                <strong class="wrap-any">🎚️ ${esc(l.name)}</strong>
+                <span class="row nowrap">
+                  <button class="small ghost" type="button" data-sp-up="${i}" aria-label="Move ${esc(l.name)} earlier" ${i === 0 ? "disabled" : ""}>↑</button>
+                  <button class="small ghost danger" type="button" data-sp-del="${i}" aria-label="Remove ${esc(l.name)}">✕</button>
+                </span>
+              </div>
+              <div class="form-grid">
+                <div><label for="sp-label-${i}">Label</label><input id="sp-label-${i}" data-sp-f="${i}:label" maxlength="40" value="${esc(l.label)}" placeholder="e.g. Verse, Solo" /></div>
+                <div><label for="sp-note-${i}">Note</label><input id="sp-note-${i}" data-sp-f="${i}:note" maxlength="1000" value="${esc(l.note)}" /></div>
+              </div>
+            </div>`).join("")}
+        </div>
+        ${allPresets.length ? `
+        <div class="row nowrap">
+          <select id="preset-pick" aria-label="Preset to use">
+            <option value="">Use a preset...</option>
+            ${allPresets.map((pr) => `<option value="${pr.id}">${esc(pr.name)}${pr.artist ? ` (${esc(pr.artist)})` : ""}</option>`).join("")}
+          </select>
+        </div>` : `<p class="hint">No presets yet. Make one on the Presets page, or save a song's chain as a preset from its page.</p>`}`;
+  }
+
   function render() {
+    const noun = isPreset ? "preset" : "song";
     view.innerHTML = `
-      <div class="pagehead"><h1>${song ? "Edit song" : "Add song"}</h1></div>
+      <div class="pagehead"><h1>${song ? "Edit " + noun : "Add " + noun}</h1></div>
       <form id="song-form" class="stack">
+        ${isPreset ? presetFields() : `
         <div class="card stack">
           <div class="form-grid">
             <div><label for="sg-title">Title</label><input id="sg-title" data-f="title" required maxlength="120" value="${esc(draft.title)}" /></div>
@@ -1082,10 +1333,11 @@ async function songEditorView(id) {
                 <button class="small" type="button" id="sg-set-load" ${draft.set_id ? "" : "disabled"}>Add its gear to the chain</button>
               </div></div>` : ""}
           </div>
-        </div>
+        </div>`}
+        ${isPreset ? "" : presetPicker()}
 
-        <h2>Signal chain</h2>
-        <p class="hint" style="margin-top:-6px">Each piece of gear in the order the signal runs, with its settings for this song. Knob names come from the gear's controls; type the positions.</p>
+        <h2>${isPreset || !draft.presets.length ? "Signal chain" : "Song's own settings"}</h2>
+        <p class="hint" style="margin-top:-6px">Each piece of gear in the order the signal runs, with its settings for this ${isPreset ? "tone" : "song"}. Knob names come from the gear's controls; type the positions.</p>
         <div class="stack" id="rig-rows">
           ${draft.rig.map((r, i) => `
             <div class="card rig-row">
@@ -1162,8 +1414,8 @@ async function songEditorView(id) {
         <div class="card"><label for="sg-notes">Notes</label><textarea id="sg-notes" data-f="notes" maxlength="4000">${esc(draft.notes)}</textarea></div>
         <p class="error" id="sg-error"></p>
         <div class="sheet-actions sticky-actions">
-          <a class="btn" href="${song ? `#/songs/${song.id}` : "#/songs"}">Cancel</a>
-          <button class="primary" type="submit">${song ? "Save song" : "Add song"}</button>
+          <a class="btn" href="${song ? `#/${base}/${song.id}` : `#/${base}`}">Cancel</a>
+          <button class="primary" type="submit">${song ? "Save " + noun : "Add " + noun}</button>
         </div>
       </form>`;
     bind();
@@ -1173,10 +1425,28 @@ async function songEditorView(id) {
   function bind() {
     const $ = (sel) => view.querySelectorAll(sel);
     $("[data-f]").forEach((el) => el.addEventListener("input", () => { draft[el.dataset.f] = el.value; }));
-    document.getElementById("sg-guitar").addEventListener("change", (e) => {
+    const guitarSel = document.getElementById("sg-guitar");
+    if (guitarSel) guitarSel.addEventListener("change", (e) => {
       draft.guitar_id = e.target.value ? Number(e.target.value) : null;
       const g = byId.get(draft.guitar_id);
       if (g) { addToRig(g, true); render(); }
+    });
+    $("[data-sp-f]").forEach((el) => el.addEventListener("input", () => {
+      const [i, f] = el.dataset.spF.split(":");
+      draft.presets[Number(i)][f] = el.value;
+    }));
+    $("[data-sp-del]").forEach((b) => b.addEventListener("click", () => { draft.presets.splice(Number(b.dataset.spDel), 1); render(); }));
+    $("[data-sp-up]").forEach((b) => b.addEventListener("click", () => {
+      const i = Number(b.dataset.spUp);
+      [draft.presets[i - 1], draft.presets[i]] = [draft.presets[i], draft.presets[i - 1]];
+      render();
+    }));
+    const presetPick = document.getElementById("preset-pick");
+    if (presetPick) presetPick.addEventListener("change", () => {
+      const pr = allPresets.find((x) => x.id === Number(presetPick.value));
+      if (!pr) return;
+      draft.presets.push({ preset_id: pr.id, label: "", note: "", name: pr.name });
+      render();
     });
     document.getElementById("sg-amp").addEventListener("change", (e) => {
       draft.amp_id = e.target.value ? Number(e.target.value) : null;
@@ -1265,9 +1535,15 @@ async function songEditorView(id) {
     const err = document.getElementById("sg-error");
     err.textContent = "";
     const intOrNull = (v) => (v === "" || v === null || v === undefined ? null : Number(v));
+    const fields = isPreset
+      ? { name: draft.name, artist: draft.artist, amp_id: draft.amp_id, notes: draft.notes }
+      : {
+        title: draft.title, artist: draft.artist, tuning: draft.tuning, capo: intOrNull(draft.capo), key: draft.key,
+        bpm: intOrNull(draft.bpm), guitar_id: draft.guitar_id, amp_id: draft.amp_id, set_id: draft.set_id, notes: draft.notes,
+        presets: draft.presets.map((l) => ({ preset_id: l.preset_id, label: l.label, note: l.note })),
+      };
     const body = {
-      title: draft.title, artist: draft.artist, tuning: draft.tuning, capo: intOrNull(draft.capo), key: draft.key,
-      bpm: intOrNull(draft.bpm), guitar_id: draft.guitar_id, amp_id: draft.amp_id, set_id: draft.set_id, notes: draft.notes,
+      ...fields,
       rig: draft.rig.map((r) => ({
         gear_id: r.gear_id, gear_name: r.gear_name, engaged: r.engaged, note: r.note, knobs: cleanKnobs(r.knobs),
       })),
@@ -1283,10 +1559,10 @@ async function songEditorView(id) {
     };
     try {
       const saved = song
-        ? await api(`/api/songs/${song.id}`, { method: "PATCH", body })
-        : await api("/api/songs", { method: "POST", body });
-      toast(song ? "Saved" : "Song added");
-      location.hash = `#/songs/${saved.id}`;
+        ? await api(`/api/${base}/${song.id}`, { method: "PATCH", body })
+        : await api(`/api/${base}`, { method: "POST", body });
+      toast(song ? "Saved" : isPreset ? "Preset added" : "Song added");
+      location.hash = `#/${base}/${saved.id}`;
     } catch (ex) {
       err.textContent = ex.message;
       err.scrollIntoView({ block: "center" });

@@ -11,6 +11,7 @@ const state = {
   me: null,
   settings: null,
   appName: "Gearsmith",
+  newToken: null, // freshly created API token, shown once until dismissed or you leave Settings
 };
 
 const TYPE_ICON = { guitar: "🎸", amp: "🔊", pedal: "🎛️", pick: "▲" };
@@ -144,6 +145,7 @@ function route() {
   const hash = location.hash || "#/";
   const parts = hash.slice(2).split("/").filter(Boolean);
   let tab = "gear";
+  if (parts[0] !== "settings") state.newToken = null;
   if (parts[0] === "gear" && parts[1]) { gearDetailView(Number(parts[1])); }
   else if (parts[0] === "sets") { tab = "sets"; featureOn("feature_sets") ? setsView() : (location.hash = "#/"); }
   else if (parts[0] === "due") { tab = "due"; featureOn("feature_maintenance") ? dueView() : (location.hash = "#/"); }
@@ -666,7 +668,15 @@ async function settingsView() {
         <input id="tk-name" placeholder="Token name, e.g. my phone" required maxlength="60" style="flex:1" />
         <button class="small primary" type="submit">Create token</button>
       </form>
-      <div id="token-result"></div>
+      <div id="token-result">${state.newToken ? `
+        <div class="stack" style="margin-top:12px">
+          <p class="hint" style="margin:0">New token <strong>${esc(state.newToken.name)}</strong>. Copy it now; it won't be shown again.</p>
+          <div class="token-new" id="token-value" style="user-select:all">${esc(state.newToken.token)}</div>
+          <div class="row">
+            <button class="small primary" id="token-copy" type="button">Copy token</button>
+            <button class="small ghost" id="token-done" type="button">Done</button>
+          </div>
+        </div>` : ""}</div>
     </div>
     ${isAdmin ? `
     <div class="card settings-section stack">
@@ -734,21 +744,62 @@ async function settingsView() {
     });
   }
 
+  // The new token lives in state.newToken, so it survives every re-render of this view
+  // (list refresh, revoking another token) until the user taps Done or leaves Settings.
   document.getElementById("add-token").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const t = await api("/api/tokens", { method: "POST", body: { name: document.getElementById("tk-name").value } });
-    document.getElementById("token-result").innerHTML = `
-      <p class="hint">Copy this now; it won't be shown again:</p>
-      <div class="token-new">${esc(t.token)}</div>`;
-    settingsView();
-    document.getElementById("token-result").innerHTML = `
-      <p class="hint">Copy this now; it won't be shown again:</p>
-      <div class="token-new">${esc(t.token)}</div>`;
+    const btn = e.submitter || e.target.querySelector("button[type=submit]");
+    if (btn) btn.disabled = true;
+    try {
+      const t = await api("/api/tokens", { method: "POST", body: { name: document.getElementById("tk-name").value } });
+      state.newToken = { id: t.id, name: t.name, token: t.token };
+      await settingsView();
+      document.getElementById("token-result").scrollIntoView({ block: "nearest" });
+    } catch (ex) {
+      toast(ex.message);
+      if (btn) btn.disabled = false;
+    }
+  });
+  const copyBtn = document.getElementById("token-copy");
+  if (copyBtn) copyBtn.addEventListener("click", async () => {
+    const value = state.newToken ? state.newToken.token : "";
+    let ok = false;
+    try {
+      if (navigator.clipboard && window.isSecureContext) { await navigator.clipboard.writeText(value); ok = true; }
+    } catch (ex) { ok = false; }
+    if (!ok) {
+      // Plain http (common on a LAN) has no clipboard API: fall back to a hidden textarea
+      const ta = document.createElement("textarea");
+      ta.value = value;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try { ok = document.execCommand("copy"); } catch (ex) { ok = false; }
+      ta.remove();
+    }
+    if (ok) { copyBtn.textContent = "Copied"; toast("Token copied"); }
+    else {
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById("token-value"));
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      toast("Selected; copy it manually");
+    }
+  });
+  const doneBtn = document.getElementById("token-done");
+  if (doneBtn) doneBtn.addEventListener("click", () => {
+    state.newToken = null;
+    document.getElementById("token-result").innerHTML = "";
   });
   view.querySelectorAll("[data-deltoken]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Revoke this token? Anything using it stops working right away.")) return;
     await api(`/api/tokens/${b.dataset.deltoken}`, { method: "DELETE" });
+    if (state.newToken && String(state.newToken.id) === b.dataset.deltoken) state.newToken = null;
     toast("Token revoked");
-    settingsView();
+    await settingsView();
   }));
 
   if (isAdmin) {

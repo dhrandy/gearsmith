@@ -1815,10 +1815,12 @@ async function songDetailView(id) {
   }));
 }
 
+// A fresh rig entry starts from the gear's controls, prefilled with your everyday setting
+// for each one. Type over anything the song needs different; the defaults stay on the gear.
 function knobsFromControls(g) {
   const controls = (g && g.controls) || [];
   if (!controls.length) return [{ name: "", value: "", kind: "knob" }];
-  return controls.map((c) => ({ name: c.name, value: "", kind: c.kind }));
+  return controls.map((c) => ({ name: c.name, value: c.value || "", kind: c.kind }));
 }
 
 /* One editor for songs and presets: both are a signal chain plus patches. */

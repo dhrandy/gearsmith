@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.5.0"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -286,6 +286,7 @@ def init_db() -> None:
           status TEXT NOT NULL DEFAULT '',
           purchase_date TEXT,
           purchase_price REAL,
+          current_value REAL,
           notes TEXT NOT NULL DEFAULT '',
           restring_interval_days INTEGER,
           favorite INTEGER NOT NULL DEFAULT 0,
@@ -454,6 +455,22 @@ def init_db() -> None:
           user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
           created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS setlists (
+          id INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          notes TEXT NOT NULL DEFAULT '',
+          created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS setlist_songs (
+          id INTEGER PRIMARY KEY,
+          setlist_id INTEGER NOT NULL REFERENCES setlists(id) ON DELETE CASCADE,
+          song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
+          position INTEGER NOT NULL DEFAULT 0,
+          note TEXT NOT NULL DEFAULT ''
+        );
+        CREATE INDEX IF NOT EXISTS idx_setlist_songs ON setlist_songs(setlist_id, position);
         CREATE TABLE IF NOT EXISTS song_presets (
           id INTEGER PRIMARY KEY,
           song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
@@ -506,6 +523,9 @@ def migrate(c) -> None:
         c.execute("ALTER TABLE gear ADD COLUMN sets_on_hand INTEGER")
     if "manual_url" not in gear_cols:
         c.execute("ALTER TABLE gear ADD COLUMN manual_url TEXT NOT NULL DEFAULT ''")
+    # 0.5.0: what an item is worth today, next to what you paid.
+    if "current_value" not in gear_cols:
+        c.execute("ALTER TABLE gear ADD COLUMN current_value REAL")
     restring_cols = {r["name"] for r in c.execute("PRAGMA table_info(restrings)")}
     if "strings_id" not in restring_cols:
         c.execute("ALTER TABLE restrings ADD COLUMN strings_id INTEGER REFERENCES gear(id) ON DELETE SET NULL")
@@ -1073,6 +1093,7 @@ def gear_dict(c, row, on: date | None = None) -> dict[str, Any]:
         "status_label": GEAR_STATUS_LABELS.get(row["status"], row["status"]),
         "purchase_date": row["purchase_date"],
         "purchase_price": row["purchase_price"],
+        "current_value": row["current_value"],
         "notes": row["notes"],
         "restring_interval_days": row["restring_interval_days"],
         "favorite": bool(row["favorite"]),
@@ -1116,6 +1137,9 @@ class GearIn(BaseModel):
     status: Literal["", "home", "luthier", "lent"] = ""
     purchase_date: str | None = None
     purchase_price: float | None = Field(default=None, ge=0, le=10_000_000)
+    current_value: float | None = Field(
+        default=None, ge=0, le=10_000_000, description="What it's worth today in USD (your own estimate)"
+    )
     notes: str = Field(default="", max_length=4000)
     restring_interval_days: int | None = Field(default=None, ge=1, le=730)
     favorite: bool | None = None
@@ -1148,6 +1172,9 @@ class GearPatch(BaseModel):
     status: Literal["", "home", "luthier", "lent"] | None = None
     purchase_date: str | None = None
     purchase_price: float | None = Field(default=None, ge=0, le=10_000_000)
+    current_value: float | None = Field(
+        default=None, ge=0, le=10_000_000, description="What it's worth today in USD (your own estimate)"
+    )
     notes: str | None = Field(default=None, max_length=4000)
     restring_interval_days: int | None = Field(default=None, ge=1, le=730)
     favorite: bool | None = None
@@ -1181,13 +1208,14 @@ def create_gear(c, body: GearIn, user_id: int | None) -> int:
     stamp = now_iso()
     return c.execute(
         """INSERT INTO gear(type,name,make,model,year,serial,specs,status,purchase_date,
-           purchase_price,notes,restring_interval_days,favorite,lifecycle,want_price,sold_date,
-           sold_price,sets_on_hand,manual_url,strings_id,created_by,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           purchase_price,current_value,notes,restring_interval_days,favorite,lifecycle,want_price,
+           sold_date,sold_price,sets_on_hand,manual_url,strings_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             body.type, body.name.strip(), body.make.strip(), body.model.strip(), body.year,
             body.serial.strip(), json.dumps(clean_specs(body.type, body.specs)), body.status,
-            body.purchase_date, body.purchase_price, body.notes.strip(), body.restring_interval_days,
+            body.purchase_date, body.purchase_price, body.current_value, body.notes.strip(),
+            body.restring_interval_days,
             int(bool(body.favorite)), body.lifecycle or "owned", body.want_price, body.sold_date,
             body.sold_price, body.sets_on_hand, body.manual_url, body.strings_id, user_id, stamp, stamp,
         ),
@@ -1264,6 +1292,57 @@ def list_gear_rows(
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY type, favorite DESC, name COLLATE NOCASE"
     return [gear_dict(c, r) for r in c.execute(sql, params)]
+
+
+def money(value: float | None) -> float:
+    return round(value or 0, 2)
+
+
+def collection_summary(c) -> dict[str, Any]:
+    """Totals for the Gear page. Owned gear is the collection; the want list and sold gear
+    are counted on their own so a wish list never inflates what you have."""
+    owned = c.execute(
+        "SELECT type, purchase_price, current_value FROM gear WHERE lifecycle='owned'"
+    ).fetchall()
+    by_type: dict[str, dict[str, Any]] = {}
+    totals = {"items": 0, "priced": 0, "valued": 0, "paid": 0.0, "value": 0.0, "change": 0.0}
+    for r in owned:
+        paid, worth = r["purchase_price"], r["current_value"]
+        # An item with no value set is counted at what you paid for it.
+        estimate = worth if worth is not None else paid
+        for bucket in (totals, by_type.setdefault(r["type"], {"items": 0, "paid": 0.0, "value": 0.0})):
+            bucket["items"] += 1
+            bucket["paid"] += paid or 0
+            bucket["value"] += estimate or 0
+        if paid is not None:
+            totals["priced"] += 1
+        if worth is not None:
+            totals["valued"] += 1
+            if paid is not None:
+                totals["change"] += worth - paid
+    want = c.execute(
+        "SELECT COUNT(*) AS n, COUNT(want_price) AS priced, SUM(want_price) AS total FROM gear WHERE lifecycle='want'"
+    ).fetchone()
+    sold = c.execute(
+        "SELECT COUNT(*) AS n, SUM(sold_price) AS total, SUM(purchase_price) AS paid FROM gear WHERE lifecycle='sold'"
+    ).fetchone()
+    return {
+        "currency": "USD",
+        "owned": {k: money(v) if isinstance(v, float) else v for k, v in totals.items()},
+        "by_type": [
+            {"type": t, "label": GEAR_TYPE_LABELS[t], "items": b["items"], "paid": money(b["paid"]), "value": money(b["value"])}
+            for t in GEAR_TYPES if (b := by_type.get(t))
+        ],
+        "want": {"items": want["n"], "priced": want["priced"], "total": money(want["total"])},
+        "sold": {"items": sold["n"], "total": money(sold["total"]), "paid": money(sold["paid"])},
+    }
+
+
+@app.get("/api/collection")
+def get_collection(request: Request):
+    current_user(request)
+    with db() as c:
+        return collection_summary(c)
 
 
 @app.get("/api/gear")
@@ -1618,22 +1697,25 @@ def set_dict(c, row) -> dict[str, Any]:
         "name": row["name"],
         "notes": row["notes"],
         "share": share_info(c, "set", row["id"]),
-        "items": [
-            {
-                "id": g["id"],
-                "type": g["type"],
-                "name": g["name"],
-                "make": g["make"],
-                "model": g["model"],
-                "cover": (lambda p: f"/api/photos/{p['filename']}" if p else None)(
-                    c.execute(
-                        "SELECT filename FROM gear_photos WHERE gear_id=? ORDER BY sort, id LIMIT 1",
-                        (g["id"],),
-                    ).fetchone()
-                ),
-            }
-            for g in items
-        ],
+        "items": [set_item(c, g) for g in items],
+    }
+
+
+def set_item(c, g) -> dict[str, Any]:
+    cover = c.execute(
+        "SELECT filename FROM gear_photos WHERE gear_id=? ORDER BY sort, id LIMIT 1", (g["id"],)
+    ).fetchone()
+    specs = json.loads(g["specs"] or "{}") if g["type"] == "pedal" else {}
+    return {
+        "id": g["id"],
+        "type": g["type"],
+        "name": g["name"],
+        "make": g["make"],
+        "model": g["model"],
+        # power needs, for the pedalboard's current draw total
+        "voltage": specs.get("voltage"),
+        "ma_draw": specs.get("ma_draw"),
+        "cover": f"/api/photos/{cover['filename']}" if cover else None,
     }
 
 
@@ -3084,12 +3166,151 @@ def register_song_routes(prefix: str, auth, v1: bool) -> None:
             return set_song_cover(c, photo_id)
 
 
+# ---------------------------------------------------------------- setlists
+# A setlist is an ordered run of songs for a practice session or a gig. Each entry is a live
+# link to the song, so its presets and knob settings always show as they are now.
+
+
+class SetlistSongIn(BaseModel):
+    song_id: int
+    note: str = Field(default="", max_length=300)
+
+
+class SetlistIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    notes: str = Field(default="", max_length=2000)
+    songs: list[SetlistSongIn] = Field(default_factory=list, max_length=200, description="Songs in play order")
+
+
+class SetlistPatch(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    notes: str | None = Field(default=None, max_length=2000)
+    songs: list[SetlistSongIn] | None = Field(
+        default=None, max_length=200, description="Songs in play order; sending it replaces the whole list"
+    )
+
+
+def get_setlist_row(c, setlist_id: int):
+    row = c.execute("SELECT * FROM setlists WHERE id=?", (setlist_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Setlist not found")
+    return row
+
+
+def setlist_entries(c, setlist_id: int):
+    return c.execute(
+        """SELECT ss.*, s.title, s.artist FROM setlist_songs ss JOIN songs s ON s.id=ss.song_id
+        WHERE ss.setlist_id=? ORDER BY ss.position, ss.id""",
+        (setlist_id,),
+    ).fetchall()
+
+
+def setlist_summary(c, row) -> dict[str, Any]:
+    entries = setlist_entries(c, row["id"])
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "notes": row["notes"],
+        "song_count": len(entries),
+        "song_titles": [e["title"] for e in entries],
+        "added_by": display_user(c, row["created_by"]) or "System",
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def setlist_dict(c, row) -> dict[str, Any]:
+    out = setlist_summary(c, row)
+    out["songs"] = [
+        {
+            "id": e["id"],
+            "song_id": e["song_id"],
+            "position": e["position"],
+            "note": e["note"],
+            "song": song_dict(c, get_song_row(c, e["song_id"])),
+        }
+        for e in setlist_entries(c, row["id"])
+    ]
+    return out
+
+
+def replace_setlist_songs(c, setlist_id: int, songs: list[SetlistSongIn]) -> None:
+    for item in songs:
+        get_song_row(c, item.song_id)  # 404 before anything changes
+    c.execute("DELETE FROM setlist_songs WHERE setlist_id=?", (setlist_id,))
+    for pos, item in enumerate(songs):
+        # the same song can come up twice (an encore, a warm-up and a run-through)
+        c.execute(
+            "INSERT INTO setlist_songs(setlist_id,song_id,position,note) VALUES(?,?,?,?)",
+            (setlist_id, item.song_id, pos, item.note.strip()),
+        )
+
+
+def register_setlist_routes(prefix: str, auth, v1: bool) -> None:
+    """Setlist routes for the web app (session cookie) and the token API (/api/v1)."""
+    extra: dict[str, Any] = {"tags": ["v1"]} if v1 else {"include_in_schema": False}
+    tag = "v1_" if v1 else ""
+
+    def route(method: str, path: str, summary: str, **kw):
+        return getattr(app, method)(prefix + path, summary=summary, name=f"{tag}{method}_{path}", **extra, **kw)
+
+    @route("get", "/setlists", "List setlists with their song titles in order")
+    def _list(request: Request):
+        auth(request)
+        with db() as c:
+            rows = c.execute("SELECT * FROM setlists ORDER BY updated_at DESC, id DESC").fetchall()
+            return [setlist_summary(c, r) for r in rows]
+
+    @route("post", "/setlists", "Create a setlist: a name and songs in play order", status_code=201)
+    def _add(body: SetlistIn, request: Request):
+        user = auth(request)
+        stamp = now_iso()
+        with db() as c:
+            setlist_id = c.execute(
+                "INSERT INTO setlists(name,notes,created_by,created_at,updated_at) VALUES(?,?,?,?,?)",
+                (body.name.strip(), body.notes.strip(), user["id"], stamp, stamp),
+            ).lastrowid
+            replace_setlist_songs(c, setlist_id, body.songs)
+            return setlist_dict(c, get_setlist_row(c, setlist_id))
+
+    @route("get", "/setlists/{setlist_id}", "Get a setlist with each song's presets and settings")
+    def _get(setlist_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            return setlist_dict(c, get_setlist_row(c, setlist_id))
+
+    @route("patch", "/setlists/{setlist_id}", "Rename a setlist, edit its notes, or replace its songs (new order)")
+    def _patch(setlist_id: int, body: SetlistPatch, request: Request):
+        auth(request)
+        with db() as c:
+            get_setlist_row(c, setlist_id)
+            data = body.model_dump(exclude_unset=True)
+            songs = data.pop("songs", None)
+            fields = {k: v.strip() for k, v in data.items() if v is not None}
+            fields["updated_at"] = now_iso()
+            cols = ", ".join(f"{k}=?" for k in fields)
+            c.execute(f"UPDATE setlists SET {cols} WHERE id=?", (*fields.values(), setlist_id))
+            if songs is not None:
+                replace_setlist_songs(c, setlist_id, body.songs)
+            return setlist_dict(c, get_setlist_row(c, setlist_id))
+
+    @route("delete", "/setlists/{setlist_id}", "Delete a setlist (the songs stay)")
+    def _delete(setlist_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            get_setlist_row(c, setlist_id)
+            c.execute("DELETE FROM setlists WHERE id=?", (setlist_id,))
+            return {"ok": True}
+
+
 register_song_routes("/api", session_user, v1=False)
 register_song_routes("/api/v1", token_user, v1=True)
 register_share_routes("/api", session_user, v1=False)
 register_share_routes("/api/v1", token_user, v1=True)
 register_preset_routes("/api", session_user, v1=False)
 register_preset_routes("/api/v1", token_user, v1=True)
+register_setlist_routes("/api", session_user, v1=False)
+register_setlist_routes("/api/v1", token_user, v1=True)
 
 
 @app.get("/api/song-options")
@@ -3118,6 +3339,7 @@ def export_data(request: Request):
             "sets": [set_dict(c, r) for r in c.execute("SELECT * FROM sets ORDER BY id")],
             "songs": [song_dict(c, r) for r in c.execute("SELECT * FROM songs ORDER BY id")],
             "presets": [preset_dict(c, r) for r in c.execute("SELECT * FROM presets ORDER BY id")],
+            "setlists": [setlist_dict(c, r) for r in c.execute("SELECT * FROM setlists ORDER BY id")],
         }
     return JSONResponse(
         payload,
@@ -3306,6 +3528,15 @@ def revoke_token(item_id: int, request: Request):
 # ---------------------------------------------------------------- token API (v1)
 # Everything below /api/v1 authenticates with a Bearer token from Settings > API tokens
 # and acts as the user who created the token. Interactive docs live at /api/docs.
+
+
+@app.get("/api/v1/collection", tags=["v1"],
+         summary="Collection totals in USD: what you paid and what your owned gear is worth "
+                 "(value falls back to price paid), plus the want list and sold totals")
+def v1_collection(request: Request):
+    token_auth(request)
+    with db() as c:
+        return collection_summary(c)
 
 
 @app.get("/api/v1/gear", tags=["v1"],

@@ -2984,6 +2984,119 @@ function tunerView() {
   });
 }
 
+/* ------------------------------------------------------- global search */
+
+// One box in the header searches the whole app: gear, songs, artists, presets, sets and setlists.
+(function initGlobalSearch() {
+  const input = document.getElementById("global-search");
+  const drop = document.getElementById("gsearch-drop");
+  let timer = null;
+  let lastFetch = 0;
+  let active = -1;
+
+  function close(clear = false) {
+    drop.hidden = true;
+    drop.innerHTML = "";
+    active = -1;
+    if (clear) input.value = "";
+  }
+
+  function items() {
+    return [...drop.querySelectorAll(".gsr-item")];
+  }
+
+  function highlight(next) {
+    const links = items();
+    if (!links.length) return;
+    active = (next + links.length) % links.length;
+    links.forEach((el, i) => el.classList.toggle("active", i === active));
+    links[active].scrollIntoView({ block: "nearest" });
+  }
+
+  function group(label, rows) {
+    return `<div class="gsr-heading">${esc(label)}</div>${rows.join("")}`;
+  }
+
+  function resultItem(href, icon, name, meta, badge = "") {
+    return `<a class="gsr-item" href="${href}">
+      <span class="gsr-icon" aria-hidden="true">${icon}</span>
+      <span class="gsr-main"><span class="gsr-name">${esc(name)}</span>${meta ? `<span class="gsr-meta">${esc(meta)}</span>` : ""}</span>
+      ${badge}
+    </a>`;
+  }
+
+  function render(data) {
+    const groups = [];
+    const gear = (data.gear || []).filter((g) => featureOn(FEATURE_FOR_TYPE[g.type]));
+    if (gear.length) {
+      groups.push(group("Gear", gear.map((g) => {
+        const badge = g.lifecycle !== "owned"
+          ? `<span class="badge ${esc(g.lifecycle)}">${esc(g.lifecycle_label)}</span>` : "";
+        return resultItem(`#/gear/${g.id}`, TYPE_ICON[g.type] || "\u{1F3B8}", g.name, [g.make, g.model].filter(Boolean).join(" "), badge);
+      })));
+    }
+    if (featureOn("feature_songs")) {
+      if (data.songs.length) {
+        groups.push(group("Songs", data.songs.map((s) => resultItem(`#/songs/${s.id}`, "\u{1F3B5}", s.title, s.artist))));
+      }
+      if (data.presets.length) {
+        groups.push(group("Presets", data.presets.map((p) => resultItem(`#/presets/${p.id}`, "\u{1F39B}\uFE0F", p.name, p.artist))));
+      }
+      if (data.artists.length) {
+        groups.push(group("Artists", data.artists.map((a) => {
+          const counts = [
+            a.song_count ? `${a.song_count} song${a.song_count === 1 ? "" : "s"}` : "",
+            a.preset_count ? `${a.preset_count} preset${a.preset_count === 1 ? "" : "s"}` : "",
+          ].filter(Boolean).join(" \u00B7 ");
+          return resultItem("#/songs/artists", "\u{1F3A4}", a.artist, counts);
+        })));
+      }
+      if (data.setlists.length) {
+        groups.push(group("Setlists", data.setlists.map((l) => resultItem(`#/setlists/${l.id}`, "\u{1F4CB}", l.name, ""))));
+      }
+    }
+    if (featureOn("feature_sets") && data.sets.length) {
+      groups.push(group("Sets", data.sets.map((s) => resultItem(`#/sets/${s.id}`, "\u{1F9E9}", s.name, ""))));
+    }
+    drop.innerHTML = groups.join("") || `<p class="gsr-empty">Nothing matches "${esc(data.q)}".</p>`;
+    drop.hidden = false;
+    active = -1;
+  }
+
+  async function run() {
+    const q = input.value.trim();
+    if (q.length < 2) { close(); return; }
+    const stamp = ++lastFetch;
+    try {
+      const data = await api(`/api/search?q=${encodeURIComponent(q)}`);
+      if (stamp !== lastFetch) return; // a newer search already answered
+      render(data);
+    } catch { /* signed out or offline: leave the dropdown closed */ }
+  }
+
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    timer = setTimeout(run, 200);
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { close(true); input.blur(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); highlight(active + 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); highlight(active - 1); }
+    else if (e.key === "Enter") {
+      const links = items();
+      if (links.length) { e.preventDefault(); links[active >= 0 ? active : 0].click(); }
+    }
+  });
+  input.addEventListener("focus", () => { if (input.value.trim().length >= 2) run(); });
+  document.addEventListener("click", (e) => {
+    if (!drop.hidden && !e.target.closest(".gsearch")) close();
+  });
+  drop.addEventListener("click", (e) => {
+    if (e.target.closest(".gsr-item")) close(true);
+  });
+  window.addEventListener("hashchange", () => close());
+})();
+
 /* ---------------------------------------------------------------- boot */
 
 async function boot(skipStatus = false) {

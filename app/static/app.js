@@ -156,6 +156,37 @@ function route() {
 
 window.addEventListener("hashchange", route);
 
+/* ---------------------------------------------------------------- favorites */
+
+const FAV_ONLY_KEY = "gearsmith.favoritesOnly";
+
+function favOnly() {
+  try { return localStorage.getItem(FAV_ONLY_KEY) === "1"; } catch { return false; }
+}
+
+function setFavOnly(on) {
+  try { localStorage.setItem(FAV_ONLY_KEY, on ? "1" : "0"); } catch { /* private mode: just don't remember */ }
+}
+
+// Same order the server uses: favorites first, then by name.
+function byFavoriteThenName(a, b) {
+  if (a.favorite !== b.favorite) return a.favorite ? -1 : 1;
+  return a.name.localeCompare(b.name, undefined, { sensitivity: "base" });
+}
+
+function starButton(g, cls = "star", text = "") {
+  const label = g.favorite ? `Remove ${g.name} from favorites` : `Add ${g.name} to favorites`;
+  return `<button class="${cls}${g.favorite ? " on" : ""}" type="button" data-fav="${g.id}"
+    aria-pressed="${g.favorite}" aria-label="${esc(label)}" title="${g.favorite ? "Favorite" : "Mark as favorite"}">
+    <span aria-hidden="true">${g.favorite ? "★" : "☆"}</span>${text ? ` ${esc(text)}` : ""}</button>`;
+}
+
+async function toggleFavorite(g) {
+  const updated = await api(`/api/gear/${g.id}`, { method: "PATCH", body: { favorite: !g.favorite } });
+  g.favorite = updated.favorite;
+  return g;
+}
+
 /* ---------------------------------------------------------------- gear list */
 
 async function gearListView() {
@@ -167,20 +198,31 @@ async function gearListView() {
       <h1>Gear</h1>
       <button class="primary" id="add-gear" type="button">Add gear</button>
     </div>
-    <div class="toolbar"><input type="search" id="gear-search" placeholder="Filter by name, make, model..." /></div>
+    <div class="toolbar">
+      <input type="search" id="gear-search" placeholder="Filter by name, make, model..." />
+      <button class="fav-filter" id="fav-only" type="button" aria-pressed="false"><span aria-hidden="true">☆</span> Favorites only</button>
+    </div>
     <div id="gear-sections"></div>`;
   const container = document.getElementById("gear-sections");
-  function render(filter = "") {
-    const needle = filter.trim().toLowerCase();
-    container.innerHTML = sections.map(({ type, items }) => {
-      const shown = needle
-        ? items.filter((g) => `${g.name} ${g.make} ${g.model}`.toLowerCase().includes(needle))
-        : items;
+  const search = document.getElementById("gear-search");
+  const favBtn = document.getElementById("fav-only");
+  let onlyFavs = favOnly();
+  function render() {
+    const needle = search.value.trim().toLowerCase();
+    favBtn.setAttribute("aria-pressed", String(onlyFavs));
+    favBtn.classList.toggle("on", onlyFavs);
+    favBtn.querySelector("span").textContent = onlyFavs ? "★" : "☆";
+    const html = sections.map(({ type, items }) => {
+      const shown = items
+        .filter((g) => !onlyFavs || g.favorite)
+        .filter((g) => !needle || `${g.name} ${g.make} ${g.model}`.toLowerCase().includes(needle))
+        .sort(byFavoriteThenName);
       if (!shown.length) return "";
       return `
         <h2 class="section-title">${esc(TYPE_LABEL[type])} <span class="count">${shown.length}</span></h2>
         <div class="grid">
           ${shown.map((g) => `
+            <div class="gear-cell">
             <a class="gear-card" href="#/gear/${g.id}">
               <span class="thumb">${g.cover ? `<img src="${g.cover}" alt="" />` : TYPE_ICON[g.type]}</span>
               <span class="gc-body">
@@ -192,12 +234,40 @@ async function gearListView() {
                   ${g.sets.length ? `<span class="badge">${g.sets.length} set${g.sets.length > 1 ? "s" : ""}</span>` : ""}
                 </span>
               </span>
-            </a>`).join("")}
+            </a>
+            ${starButton(g)}
+            </div>`).join("")}
         </div>`;
-    }).join("") || `<p class="empty">No gear yet. Add your first piece.</p>`;
+    }).join("");
+    let empty = "No gear yet. Add your first piece.";
+    if (gear.length && onlyFavs && !gear.some((g) => g.favorite)) empty = "No favorites yet. Tap the star on any card to add one.";
+    else if (gear.length) empty = "Nothing matches.";
+    container.innerHTML = html || `<p class="empty">${esc(empty)}</p>`;
   }
   render();
-  document.getElementById("gear-search").addEventListener("input", (e) => render(e.target.value));
+  search.addEventListener("input", render);
+  favBtn.addEventListener("click", () => {
+    onlyFavs = !onlyFavs;
+    setFavOnly(onlyFavs);
+    render();
+  });
+  container.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-fav]");
+    if (!btn) return;
+    e.preventDefault();
+    const g = gear.find((x) => x.id === Number(btn.dataset.fav));
+    if (!g || btn.disabled) return;
+    btn.disabled = true;
+    try {
+      await toggleFavorite(g);
+      render();
+      const again = container.querySelector(`[data-fav="${g.id}"]`);
+      if (again) again.focus({ preventScroll: true });
+    } catch (ex) {
+      btn.disabled = false;
+      toast(ex.message);
+    }
+  });
   document.getElementById("add-gear").addEventListener("click", () => gearForm());
 }
 
@@ -322,6 +392,7 @@ async function gearDetailView(id) {
     <div class="pagehead">
       <h1>${esc(g.name)}</h1>
       <div class="row">
+        <span id="gd-fav-wrap">${starButton(g, "small star-btn", "Favorite")}</span>
         <button class="small" id="gd-edit" type="button">Edit</button>
         <button class="small danger" id="gd-delete" type="button">Delete</button>
       </div>
@@ -375,6 +446,20 @@ async function gearDetailView(id) {
       </div>
     </div>` : ""}`;
 
+  const favWrap = document.getElementById("gd-fav-wrap");
+  favWrap.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-fav]");
+    if (!btn || btn.disabled) return;
+    btn.disabled = true;
+    try {
+      await toggleFavorite(g);
+      favWrap.innerHTML = starButton(g, "small star-btn", "Favorite");
+      favWrap.querySelector("button").focus({ preventScroll: true });
+    } catch (ex) {
+      btn.disabled = false;
+      toast(ex.message);
+    }
+  });
   document.getElementById("gd-edit").addEventListener("click", () => gearForm(g));
   document.getElementById("gd-delete").addEventListener("click", () => {
     openSheet(`

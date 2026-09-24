@@ -65,6 +65,14 @@ function fmtPrice(value) {
   return "$" + Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
 }
 
+// " (+$150)" against what you paid - empty when there's nothing to compare against.
+function valueChange(value, paid) {
+  if (value == null || paid == null) return "";
+  const diff = Math.round((value - paid) * 100) / 100;
+  if (!diff) return ` (same as you paid)`;
+  return ` (${diff > 0 ? "+" : "-"}${fmtPrice(Math.abs(diff))})`;
+}
+
 async function api(path, options = {}) {
   const opts = { ...options };
   if (opts.body && !(opts.body instanceof FormData)) {
@@ -199,6 +207,12 @@ function route() {
     else if (parts[1]) presetDetailView(Number(parts[1]));
     else presetsView();
   }
+  else if (parts[0] === "setlists") {
+    tab = "songs";
+    if (!featureOn("feature_songs")) location.hash = "#/";
+    else if (parts[1]) setlistDetailView(Number(parts[1]));
+    else setlistsView();
+  }
   else if (parts[0] === "sets") {
     tab = "sets";
     if (!featureOn("feature_sets")) location.hash = "#/";
@@ -285,6 +299,7 @@ async function gearListView(lifecycle = "owned") {
       ${addLabel ? `<button class="primary" id="add-gear" type="button">${addLabel}</button>` : ""}
     </div>
     ${lifecycleNav(lifecycle)}
+    <div id="gear-totals"></div>
     ${lifecycle === "want" ? `<p class="muted">Gear you're after. When you buy one, edit it and switch it to Owned.</p>` : ""}
     ${lifecycle === "sold" ? `<p class="muted">Gear you've sold, kept as history. It stays out of the strings list and the main gear page.</p>` : ""}
     <div class="toolbar">
@@ -298,6 +313,7 @@ async function gearListView(lifecycle = "owned") {
     <div id="gear-sections"></div>`;
   const container = document.getElementById("gear-sections");
   const search = document.getElementById("gear-search");
+  api("/api/collection").then((sum) => renderTotals(document.getElementById("gear-totals"), lifecycle, sum)).catch(() => {});
   const favBtn = document.getElementById("fav-only");
   const stringType = document.getElementById("string-type-filter");
   let onlyFavs = owned && favOnly();
@@ -374,6 +390,34 @@ async function gearListView(lifecycle = "owned") {
   });
   const addBtn = document.getElementById("add-gear");
   if (addBtn) addBtn.addEventListener("click", () => gearForm(null, lifecycle));
+}
+
+// Money line at the top of the Gear, Want and Sold pages. Want and Sold get their own totals
+// so the wish list never counts toward what the collection is worth.
+function renderTotals(box, lifecycle, sum) {
+  if (!box) return;
+  let html = "";
+  if (lifecycle === "owned") {
+    const o = sum.owned;
+    if (o.priced || o.valued) {
+      html = `
+        <div class="totals" id="collection-total">
+          <div class="total-main"><span>Collection value</span><strong>${esc(fmtPrice(o.value))}</strong></div>
+          <div class="total-bits">
+            <span>Paid <strong>${esc(fmtPrice(o.paid))}</strong></span>
+            ${o.valued && o.change ? `<span class="${o.change > 0 ? "up" : "down"}">${o.change > 0 ? "Up" : "Down"} <strong>${esc(fmtPrice(Math.abs(o.change)))}</strong></span>` : ""}
+            <span class="muted">${o.priced} of ${o.items} priced · ${o.valued} valued</span>
+          </div>
+        </div>`;
+    }
+  } else if (lifecycle === "want" && sum.want.priced) {
+    html = `<div class="totals" id="collection-total"><div class="total-main"><span>Want list</span><strong>${esc(fmtPrice(sum.want.total))}</strong></div>
+      <div class="total-bits"><span class="muted">${sum.want.priced} of ${sum.want.items} priced · not counted in your collection</span></div></div>`;
+  } else if (lifecycle === "sold" && sum.sold.total) {
+    html = `<div class="totals" id="collection-total"><div class="total-main"><span>Sold for</span><strong>${esc(fmtPrice(sum.sold.total))}</strong></div>
+      <div class="total-bits"><span class="muted">${sum.sold.items} item${sum.sold.items === 1 ? "" : "s"}${sum.sold.paid ? ` · paid ${esc(fmtPrice(sum.sold.paid))}` : ""}</span></div></div>`;
+  }
+  box.innerHTML = html;
 }
 
 /* ---------------------------------------------------------------- previous / next */
@@ -510,7 +554,8 @@ function gearForm(existing = null, lifecycle = "owned") {
           <input id="gf-interval" type="number" min="1" max="730" value="${g.restring_interval_days ?? 90}" />
         </div>
         <div><label for="gf-pdate">Purchase date</label><input id="gf-pdate" type="date" value="${esc(g.purchase_date || "")}" /></div>
-        <div><label for="gf-pprice">Purchase price</label><input id="gf-pprice" type="number" min="0" step="0.01" value="${g.purchase_price ?? ""}" /></div>
+        <div><label for="gf-pprice">Price paid (USD)</label><input id="gf-pprice" type="number" min="0" step="0.01" value="${g.purchase_price ?? ""}" /></div>
+        <div data-life="owned"><label for="gf-value">Current value (USD)</label><input id="gf-value" type="number" min="0" step="0.01" value="${g.current_value ?? ""}" placeholder="What it would sell for" /></div>
         <div id="gf-stock-wrap" ${g.type !== "strings" ? "hidden" : ""}>
           <label for="gf-stock">Sets on hand</label>
           <input id="gf-stock" type="number" min="0" max="999" value="${g.sets_on_hand ?? ""}" placeholder="Not tracked" />
@@ -584,6 +629,7 @@ function gearForm(existing = null, lifecycle = "owned") {
       status: document.getElementById("gf-status").value,
       purchase_date: document.getElementById("gf-pdate").value || null,
       purchase_price: document.getElementById("gf-pprice").value ? Number(document.getElementById("gf-pprice").value) : null,
+      current_value: numOrNull("gf-value"),
       notes: document.getElementById("gf-notes").value,
       restring_interval_days: t === "guitar" ? Number(document.getElementById("gf-interval").value) : null,
       strings_id: t === "guitar" && stringsSel.value ? Number(stringsSel.value) : null,
@@ -618,6 +664,7 @@ async function gearDetailView(id) {
     ["Strings", g.strings_used ? stringsLabel(g.strings_used) : ""],
     ["Status", g.status_label !== "Unspecified" ? g.status_label : ""],
     ["Purchased", [fmtDate(g.purchase_date), fmtPrice(g.purchase_price)].filter(Boolean).join(" for ")],
+    ["Value", g.current_value != null ? fmtPrice(g.current_value) + valueChange(g.current_value, g.purchase_price) : ""],
     ["Added by", g.added_by],
   ].filter(([, v]) => v !== "" && v !== null && v !== undefined);
   const specs = (g.spec_fields || []).filter((f) => f.value !== null && f.value !== undefined && f.value !== "");
@@ -1191,10 +1238,11 @@ const SONG_VIEWS = [
   ["songs", "Songs", "#/songs"],
   ["artists", "Artists", "#/songs/artists"],
   ["presets", "Presets", "#/presets"],
+  ["setlists", "Setlists", "#/setlists"],
 ];
 
 function songsNav(current) {
-  return `<nav class="seg" aria-label="Songs, artists and presets">
+  return `<nav class="seg" aria-label="Songs, artists, presets and setlists">
     ${SONG_VIEWS.map(([key, label, href]) => `<a href="${href}" class="${key === current ? "on" : ""}" ${key === current ? 'aria-current="page"' : ""}>${label}</a>`).join("")}
   </nav>`;
 }
@@ -1393,6 +1441,226 @@ async function presetDetailView(id) {
       location.hash = "#/presets";
     });
   });
+}
+
+/* ---------------------------------------------------------------- setlists */
+
+async function setlistsView() {
+  const lists = await api("/api/setlists");
+  view.innerHTML = `
+    <div class="pagehead">
+      <h1>Setlists</h1>
+      <button class="primary" id="add-setlist" type="button">New setlist</button>
+    </div>
+    ${songsNav("setlists")}
+    <p class="muted">Line up songs for a practice session or a gig. Each song shows its presets and knob settings, so the whole run is on one page.</p>
+    <div class="stack" id="setlist-list">
+      ${lists.length ? lists.map((l) => `
+        <a class="set-card setlist-card" href="#/setlists/${l.id}">
+          <div class="row set-card-head">
+            <strong class="wrap-any">${esc(l.name)}</strong>
+            <span class="chip">${l.song_count} song${l.song_count === 1 ? "" : "s"}</span>
+          </div>
+          ${l.song_titles.length ? `<p class="muted setlist-titles">${l.song_titles.map(esc).join(" › ")}</p>` : `<p class="muted setlist-titles">No songs yet.</p>`}
+        </a>`).join("") : `<p class="empty">No setlists yet. Make one for your next practice.</p>`}
+    </div>`;
+  document.getElementById("add-setlist").addEventListener("click", () => setlistForm());
+}
+
+function setlistForm(existing = null) {
+  openSheet(`
+    <h2>${existing ? "Edit" : "New"} setlist</h2>
+    <form id="setlist-form" class="stack">
+      <div><label for="sl-name">Name</label><input id="sl-name" required maxlength="80" value="${esc(existing?.name || "")}" placeholder="e.g. Tuesday practice" /></div>
+      <div><label for="sl-notes">Notes</label><textarea id="sl-notes" maxlength="2000" placeholder="Optional">${esc(existing?.notes || "")}</textarea></div>
+      <p class="error" id="sl-error"></p>
+      <div class="sheet-actions">
+        <button type="button" id="sl-cancel">Cancel</button>
+        <button class="primary" type="submit">${existing ? "Save changes" : "Create setlist"}</button>
+      </div>
+    </form>`);
+  document.getElementById("sl-cancel").addEventListener("click", closeSheet);
+  document.getElementById("setlist-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const body = { name: document.getElementById("sl-name").value, notes: document.getElementById("sl-notes").value };
+    try {
+      const saved = existing
+        ? await api(`/api/setlists/${existing.id}`, { method: "PATCH", body })
+        : await api("/api/setlists", { method: "POST", body });
+      closeSheet();
+      toast(existing ? "Saved" : "Setlist created");
+      if (existing) setlistDetailView(saved.id);
+      else location.hash = `#/setlists/${saved.id}`;
+    } catch (ex) {
+      document.getElementById("sl-error").textContent = ex.message;
+    }
+  });
+}
+
+// What to set up for one song: its linked presets first, then the song's own settings.
+function setlistSettingsHtml(song) {
+  const parts = song.presets.map((link) => `
+      <div class="sl-preset">
+        <div class="chain-head">
+          <span class="wrap-any">${link.label ? `<span class="patch-ref">${esc(link.label)}</span> ` : ""}🎚️ <strong><a href="#/presets/${link.preset.id}">${esc(link.preset.name)}</a></strong></span>
+        </div>
+        ${link.preset.amp_name ? `<p class="muted sl-line">Amp: ${gearLink(link.preset.amp_id, link.preset.amp_name)}</p>` : ""}
+        ${link.preset.rig.length ? chainHtml(link.preset.rig) : ""}
+        ${link.preset.patches.length ? patchesHtml(link.preset.patches) : ""}
+      </div>`);
+  if (song.rig.length || song.patches.length) {
+    parts.push(`
+      <div class="sl-preset">
+        <div class="chain-head"><strong>${song.presets.length ? "Song's own settings" : "Settings"}</strong></div>
+        ${song.rig.length ? chainHtml(song.rig) : ""}
+        ${song.patches.length ? patchesHtml(song.patches) : ""}
+      </div>`);
+  }
+  return parts.join("") || `<p class="muted sl-line">No presets or settings saved for this song. <a href="#/songs/${song.id}/edit">Add some</a></p>`;
+}
+
+async function setlistDetailView(id) {
+  let l;
+  try {
+    l = await api(`/api/setlists/${id}`);
+  } catch (ex) {
+    view.innerHTML = `
+      <div class="pagehead"><h1>Setlist not found</h1></div>
+      <p class="muted">This setlist may have been deleted.</p>
+      <p><a class="btn" href="#/setlists">All setlists</a></p>`;
+    return;
+  }
+  let entries = l.songs;
+
+  async function save(next) {
+    entries = next;
+    if (entries.every((e) => e.song)) render();
+    try {
+      const saved = await api(`/api/setlists/${id}`, {
+        method: "PATCH",
+        body: { songs: entries.map((e) => ({ song_id: e.song_id, note: e.note })) },
+      });
+      entries = saved.songs;
+      render();
+    } catch (ex) {
+      toast(ex.message);
+    }
+  }
+
+  function render() {
+    const guitars = new Set(entries.map((e) => e.song.guitar_name).filter(Boolean));
+    view.innerHTML = `
+      <p class="crumb"><a href="#/setlists">Setlists</a></p>
+      <div class="pagehead">
+        <h1>${esc(l.name)}</h1>
+        <div class="row">
+          <button class="small" id="sl-edit" type="button">Edit</button>
+          <button class="small danger" id="sl-delete" type="button">Delete</button>
+        </div>
+      </div>
+      <p class="muted wrap-any sl-meta">${entries.length} song${entries.length === 1 ? "" : "s"}${guitars.size ? ` · ${guitars.size} guitar${guitars.size === 1 ? "" : "s"}` : ""}</p>
+      ${l.notes ? `<p class="notes wrap-any">${esc(l.notes)}</p>` : ""}
+      <ol class="setlist" id="sl-songs">
+        ${entries.map((e, i) => {
+          const s = e.song;
+          const prev = i > 0 ? entries[i - 1].song : null;
+          const retune = prev && s.tuning && prev.tuning && s.tuning.toLowerCase() !== prev.tuning.toLowerCase();
+          const swap = prev && s.guitar_name && prev.guitar_name && s.guitar_name !== prev.guitar_name;
+          return `
+          <li class="setlist-entry" data-id="${e.id}">
+            <div class="sl-song">
+              <div class="sl-song-head">
+                <button class="board-grip" type="button" aria-label="Drag ${esc(s.title)}" title="Drag to move">⠿</button>
+                <span class="sl-num">${i + 1}</span>
+                <span class="sl-title wrap-any"><a href="#/songs/${s.id}">${esc(s.title)}</a>${s.artist ? `<span class="muted"> · ${esc(s.artist)}</span>` : ""}</span>
+              </div>
+              ${retune || swap ? `<div class="sl-change">${retune ? `<span class="badge warn">Retune to ${esc(s.tuning)}</span>` : ""}${swap ? `<span class="badge warn">Switch to ${esc(s.guitar_name)}</span>` : ""}</div>` : ""}
+              <div class="chips">${songChips(s)}${s.guitar_name ? `<span class="badge">🎸 ${esc(s.guitar_name)}</span>` : ""}${s.amp_name ? `<span class="badge">🔊 ${esc(s.amp_name)}</span>` : ""}</div>
+              <div class="sl-moves row">
+                <button class="small ghost" type="button" data-slmove="-1" aria-label="Move ${esc(s.title)} up" ${i === 0 ? "disabled" : ""}>↑</button>
+                <button class="small ghost" type="button" data-slmove="1" aria-label="Move ${esc(s.title)} down" ${i === entries.length - 1 ? "disabled" : ""}>↓</button>
+                <button class="small ghost danger" type="button" data-slremove aria-label="Remove ${esc(s.title)}">Remove</button>
+              </div>
+            </div>
+            <div class="sl-settings">${setlistSettingsHtml(s)}</div>
+          </li>`;
+        }).join("")}
+      </ol>
+      ${entries.length ? "" : `<p class="empty">No songs yet. Add some to build the run.</p>`}
+      <p><button class="primary" id="sl-add" type="button">Add songs</button></p>`;
+
+    document.getElementById("sl-edit").addEventListener("click", () => setlistForm(l));
+    document.getElementById("sl-delete").addEventListener("click", () => {
+      openSheet(`
+        <h2>Delete ${esc(l.name)}?</h2>
+        <p class="muted">This removes the setlist. The songs stay.</p>
+        <div class="sheet-actions">
+          <button type="button" id="del-cancel">Cancel</button>
+          <button class="primary danger" id="del-confirm" type="button">Delete</button>
+        </div>`);
+      document.getElementById("del-cancel").addEventListener("click", closeSheet);
+      document.getElementById("del-confirm").addEventListener("click", async () => {
+        await api(`/api/setlists/${id}`, { method: "DELETE" });
+        closeSheet();
+        toast("Setlist deleted");
+        location.hash = "#/setlists";
+      });
+    });
+    view.querySelectorAll("[data-slmove]").forEach((b) => b.addEventListener("click", () => {
+      const from = entries.findIndex((e) => e.id === Number(b.closest(".setlist-entry").dataset.id));
+      const next = [...entries];
+      next.splice(from + Number(b.dataset.slmove), 0, next.splice(from, 1)[0]);
+      save(next);
+    }));
+    view.querySelectorAll("[data-slremove]").forEach((b) => b.addEventListener("click", () => {
+      const gone = Number(b.closest(".setlist-entry").dataset.id);
+      save(entries.filter((e) => e.id !== gone));
+    }));
+    makeSortable(document.getElementById("sl-songs"), ".setlist-entry", ".board-grip", (ids) => {
+      const byId = new Map(entries.map((e) => [e.id, e]));
+      save(ids.map((i) => byId.get(i)));
+    });
+    document.getElementById("sl-add").addEventListener("click", addSongsSheet);
+  }
+
+  async function addSongsSheet() {
+    const songs = await api("/api/songs");
+    const inList = new Set(entries.map((e) => e.song_id));
+    openSheet(`
+      <h2>Add songs</h2>
+      <input type="search" id="sl-pick-search" placeholder="Filter by title or artist..." />
+      <div class="member-pick" id="sl-pick">
+        ${songs.map((s) => `
+          <label class="toggle row" style="justify-content:space-between" data-text="${esc(`${s.title} ${s.artist}`.toLowerCase())}">
+            <span class="wrap-any">${esc(s.title)} <span class="muted">${esc(s.artist)}${inList.has(s.id) ? " · already in" : ""}</span></span>
+            <input type="checkbox" data-song="${s.id}" />
+          </label>`).join("") || `<p class="muted">No songs yet. Add songs on the Songs page first.</p>`}
+      </div>
+      <p class="hint">Songs are added to the end in the order you tick them.</p>
+      <div class="sheet-actions">
+        <button type="button" id="sl-pick-cancel">Cancel</button>
+        <button class="primary" type="button" id="sl-pick-add">Add</button>
+      </div>`);
+    const picked = [];
+    sheetEl.querySelectorAll("[data-song]").forEach((box) => box.addEventListener("change", () => {
+      const sid = Number(box.dataset.song);
+      if (box.checked) picked.push(sid);
+      else picked.splice(picked.indexOf(sid), 1);
+    }));
+    document.getElementById("sl-pick-search").addEventListener("input", (e) => {
+      const needle = e.target.value.trim().toLowerCase();
+      sheetEl.querySelectorAll("#sl-pick [data-text]").forEach((row) => { row.hidden = needle && !row.dataset.text.includes(needle); });
+    });
+    document.getElementById("sl-pick-cancel").addEventListener("click", closeSheet);
+    document.getElementById("sl-pick-add").addEventListener("click", async () => {
+      closeSheet();
+      if (!picked.length) return;
+      await save([...entries, ...picked.map((sid) => ({ song_id: sid, note: "" }))]);
+      toast(`Added ${picked.length} song${picked.length === 1 ? "" : "s"}`);
+    });
+  }
+
+  render();
 }
 
 async function songDetailView(id) {
@@ -1985,8 +2253,9 @@ async function setDetailView(id) {
     </div>
     <p class="muted wrap-any" style="margin-top:0">${count} item${count === 1 ? "" : "s"}</p>
     ${s.notes ? `<p class="notes wrap-any">${esc(s.notes)}</p>` : ""}
+    <div id="sd-board"></div>
     <h2>Gear</h2>
-    <div class="card">${setMembersHtml(s)}</div>
+    <div class="card" id="sd-members">${setMembersHtml(s)}</div>
     <h2>Share</h2>
     <div class="card" id="sd-set-share"></div>`;
   document.getElementById("sd-set-edit").addEventListener("click", () => setForm(s, () => setDetailView(id)));
@@ -2007,6 +2276,159 @@ async function setDetailView(id) {
     });
   });
   mountShare(document.getElementById("sd-set-share"), "set", s.id, s.share);
+  mountBoard(document.getElementById("sd-board"), s);
+}
+
+/* ---------------------------------------------------------------- pedalboard */
+
+// Where a pedal usually sits in a chain, guessed from its name. Only used to pick a sensible
+// starting order; once you drag things around, your order wins.
+const CHAIN_SLOTS = [
+  [/\btuner\b/, 0],
+  [/wah|envelope|filter|octave|pitch|whammy/, 1],
+  [/comp|sustain/, 2],
+  [/boost|drive|screamer|klon|dist|fuzz|muff|crunch|preamp|\bod\b/, 3],
+  [/\beq\b|equali/, 4],
+  [/chorus|flang|phase|vibe|trem|rotary|\bmod\b|modulation/, 5],
+  [/delay|echo|\btime\b/, 6],
+  [/reverb|verb|hall|spring|shimmer/, 7],
+  [/loop/, 8],
+];
+
+function chainSlot(item) {
+  const text = `${item.name} ${item.make} ${item.model}`.toLowerCase();
+  const hit = CHAIN_SLOTS.find(([re]) => re.test(text));
+  return hit ? hit[1] : 4.5;
+}
+
+// Board order for a set's item ids: guitars, pedals, amps, then everything else.
+// Pedals keep the order you gave them unless `suggest` asks for the usual chain order.
+function boardOrder(items, suggest = false) {
+  const pedals = items.filter((i) => i.type === "pedal");
+  if (suggest) pedals.sort((a, b) => chainSlot(a) - chainSlot(b));
+  return [
+    ...items.filter((i) => i.type === "guitar"),
+    ...pedals,
+    ...items.filter((i) => i.type === "amp"),
+    ...items.filter((i) => !["guitar", "pedal", "amp"].includes(i.type)),
+  ];
+}
+
+function mountBoard(box, s) {
+  let items = boardOrder(s.items);
+  const guitars = items.filter((i) => i.type === "guitar");
+  const amps = items.filter((i) => i.type === "amp");
+  if (!items.some((i) => i.type === "pedal") && !(guitars.length && amps.length)) { box.innerHTML = ""; return; }
+
+  async function save(nextItems, message) {
+    items = nextItems;
+    render();
+    try {
+      await api(`/api/sets/${s.id}`, { method: "PATCH", body: { item_ids: items.map((i) => i.id) } });
+      s.items = items;
+      document.getElementById("sd-members").innerHTML = setMembersHtml(s);
+      if (message) toast(message);
+    } catch (ex) {
+      toast(ex.message);
+    }
+  }
+
+  function end(list, icon, label) {
+    return `<div class="board-end">
+        <span class="board-end-label">${label}</span>
+        ${list.length ? list.map((i) => `<a href="#/gear/${i.id}" class="wrap-any">${icon} ${esc(i.name)}</a>`).join("") : `<span class="muted">None in this set</span>`}
+      </div>`;
+  }
+
+  function render() {
+    const pedals = items.filter((i) => i.type === "pedal");
+    const draw = pedals.reduce((sum, p) => sum + (Number(p.ma_draw) || 0), 0);
+    const unknown = pedals.filter((p) => !Number(p.ma_draw)).length;
+    box.innerHTML = `
+      <div class="board-head">
+        <h2>Pedalboard</h2>
+        ${pedals.length > 1 ? `<button class="small ghost" id="board-suggest" type="button">Suggest order</button>` : ""}
+      </div>
+      <p class="muted board-hint">Signal flows <span class="board-hint-wide">left to right</span><span class="board-hint-narrow">top to bottom</span>. Drag a pedal by its handle, or use the arrows.</p>
+      <div class="board" id="board">
+        ${end(guitars, "🎸", "Input")}
+        ${pedals.map((p, i) => `
+          <div class="board-pedal" data-id="${p.id}">
+            <button class="board-grip" type="button" aria-label="Drag ${esc(p.name)}" title="Drag to move">⠿</button>
+            <span class="board-pos">${i + 1}</span>
+            <span class="thumb">${p.cover ? `<img src="${p.cover}" alt="" />` : TYPE_ICON.pedal}</span>
+            <a class="board-name" href="#/gear/${p.id}" title="${esc(p.name)}">${esc(p.name)}</a>
+            <span class="board-moves">
+              <button class="small ghost" type="button" data-move="-1" aria-label="Move ${esc(p.name)} earlier" ${i === 0 ? "disabled" : ""}>‹</button>
+              <button class="small ghost" type="button" data-move="1" aria-label="Move ${esc(p.name)} later" ${i === pedals.length - 1 ? "disabled" : ""}>›</button>
+            </span>
+          </div>`).join("")}
+        ${end(amps, "🔊", "Output")}
+      </div>
+      ${draw ? `<p class="muted board-power">Power: ${draw} mA total${unknown ? ` (${unknown} pedal${unknown === 1 ? "" : "s"} with no current draw set)` : ""}</p>` : ""}`;
+    box.querySelectorAll("[data-move]").forEach((b) => b.addEventListener("click", () => {
+      const id = Number(b.closest(".board-pedal").dataset.id);
+      const order = pedals.map((p) => p.id);
+      const from = order.indexOf(id);
+      const to = from + Number(b.dataset.move);
+      order.splice(to, 0, order.splice(from, 1)[0]);
+      save(withPedalOrder(order));
+    }));
+    const suggest = document.getElementById("board-suggest");
+    if (suggest) suggest.addEventListener("click", () => save(boardOrder(items, true), "Pedals put in the usual order"));
+    makeSortable(document.getElementById("board"), ".board-pedal", ".board-grip", (order) => save(withPedalOrder(order)));
+  }
+
+  function withPedalOrder(ids) {
+    const byId = new Map(items.map((i) => [i.id, i]));
+    return boardOrder([
+      ...items.filter((i) => i.type !== "pedal"),
+      ...ids.map((id) => byId.get(id)),
+    ]);
+  }
+
+  render();
+}
+
+/* ---------------------------------------------------------------- drag to reorder */
+
+// Pointer-based drag so it works the same with a mouse, a finger or a pen. Only the handle
+// starts a drag, so scrolling and tapping links still work. `onDrop` gets the new id order.
+function makeSortable(list, itemSel, handleSel, onDrop) {
+  list.querySelectorAll(handleSel).forEach((handle) => {
+    handle.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      const item = handle.closest(itemSel);
+      const before = [...list.querySelectorAll(itemSel)].map((el) => el.dataset.id).join();
+      e.preventDefault();
+      item.classList.add("dragging");
+      const move = (ev) => {
+        const target = [...list.querySelectorAll(itemSel)].find((el) => {
+          if (el === item) return false;
+          const r = el.getBoundingClientRect();
+          return ev.clientX >= r.left && ev.clientX <= r.right && ev.clientY >= r.top && ev.clientY <= r.bottom;
+        });
+        if (!target) return;
+        const r = target.getBoundingClientRect();
+        const style = getComputedStyle(list);
+        const row = style.display.includes("flex") && style.flexDirection.startsWith("row");
+        const after = row ? ev.clientX > r.left + r.width / 2 : ev.clientY > r.top + r.height / 2;
+        target.insertAdjacentElement(after ? "afterend" : "beforebegin", item);
+      };
+      const up = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", up);
+        window.removeEventListener("pointercancel", up);
+        item.classList.remove("dragging");
+        const ids = [...list.querySelectorAll(itemSel)].map((el) => el.dataset.id);
+        if (ids.join() !== before) onDrop(ids.map(Number));
+      };
+      // listen on the window so a fast drag that leaves the handle keeps going
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", up);
+      window.addEventListener("pointercancel", up);
+    });
+  });
 }
 
 async function setForm(existing = null, onDone = setsView) {
@@ -2036,7 +2458,13 @@ async function setForm(existing = null, onDone = setsView) {
   document.getElementById("sf-cancel").addEventListener("click", closeSheet);
   document.getElementById("set-form").addEventListener("submit", async (e) => {
     e.preventDefault();
-    const item_ids = [...sheetEl.querySelectorAll("[data-member]:checked")].map((i) => Number(i.dataset.member));
+    const picked = [...sheetEl.querySelectorAll("[data-member]:checked")].map((i) => Number(i.dataset.member));
+    // Keep the board order you already arranged; new picks join the end of their group.
+    // A brand-new set starts with its pedals in the usual chain order.
+    const kept = existing ? existing.items.map((i) => i.id).filter((id) => picked.includes(id)) : [];
+    const added = gear.filter((g) => picked.includes(g.id) && !kept.includes(g.id));
+    const byId = new Map([...(existing ? existing.items : []), ...added].map((i) => [i.id, i]));
+    const item_ids = boardOrder([...kept, ...added.map((g) => g.id)].map((id) => byId.get(id)), !existing).map((i) => i.id);
     const body = {
       name: document.getElementById("sf-name").value,
       notes: document.getElementById("sf-notes").value,

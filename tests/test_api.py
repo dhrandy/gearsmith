@@ -1222,6 +1222,17 @@ def test_tuner_feature_toggle(tmp_path):
         assert c.put("/api/settings", json={"feature_tuner": True}).json()["feature_tuner"] is True
 
 
+def test_collection_value_feature_toggle(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        assert c.get("/api/settings").json()["feature_values"] is True
+        assert c.put("/api/settings", json={"feature_values": False}).json()["feature_values"] is False
+        # hiding the numbers is a display choice: the prices stay saved and the API still totals them
+        assert c.get("/api/collection").status_code == 200
+        assert c.put("/api/settings", json={"feature_values": True}).json()["feature_values"] is True
+
+
 def test_controls_carry_settings(tmp_path):
     fresh(tmp_path)
     with TestClient(main.app) as c:

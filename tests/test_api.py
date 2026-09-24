@@ -1066,7 +1066,8 @@ def test_v030_database_upgrade_keeps_every_row(tmp_path):
     with main.db() as conn:
         conn.row_factory = None
         for t in tables:
-            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({t})") if r[1] != "strings_id"]
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({t})")
+                    if r[1] not in ("strings_id", "sets_on_hand", "manual_url")]
             after = conn.execute(f"SELECT {', '.join(cols)} FROM {t} ORDER BY rowid").fetchall()
             assert after == before[t], t
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -1086,3 +1087,158 @@ def test_v030_database_upgrade_keeps_every_row(tmp_path):
         assert c.get("/api/gear/5").json()["strings_used"]["id"] == s["id"]
         assert c.get("/api/songs/4").json()["rig"][0]["gear_id"] == 9
         assert [i["id"] for i in c.get("/api/sets/2").json()["items"]] == [9, 12]
+
+def test_strings_stock_countdown(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        strings_id = by_name["Demo Strings 10-46"]["id"]
+        starling = by_name["Starling"]["id"]
+
+        # the seed's demo strings carry stock, and only strings can track it
+        s = c.get(f"/api/gear/{strings_id}").json()
+        assert s["sets_on_hand"] == 3 and s["stock_state"] == "ok"
+        assert c.post("/api/gear", json={"type": "amp", "name": "Amp", "sets_on_hand": 2}).status_code == 400
+        assert c.patch(f"/api/gear/{starling}", json={"sets_on_hand": 2}).status_code == 400
+        assert c.get(f"/api/gear/{starling}").json()["sets_on_hand"] is None
+
+        # logging a restring with these strings takes one set out of stock
+        assert c.post(f"/api/gear/{starling}/restrings", json={"strings_id": strings_id}).status_code == 201
+        assert c.get(f"/api/gear/{strings_id}").json()["sets_on_hand"] == 2
+
+        # low and out flags, set by hand
+        assert c.patch(f"/api/gear/{strings_id}", json={"sets_on_hand": 1}).json()["stock_state"] == "low"
+        assert c.patch(f"/api/gear/{strings_id}", json={"sets_on_hand": 0}).json()["stock_state"] == "out"
+
+        # at zero the count floors instead of going negative
+        c.post(f"/api/gear/{starling}/restrings", json={"strings_id": strings_id})
+        assert c.get(f"/api/gear/{strings_id}").json()["sets_on_hand"] == 0
+
+        # a restring with no strings picked leaves stock alone
+        assert c.patch(f"/api/gear/{strings_id}", json={"sets_on_hand": 4}).status_code == 200
+        c.post(f"/api/gear/{starling}/restrings", json={"brand": "Other", "gauge": "9-42"})
+        assert c.get(f"/api/gear/{strings_id}").json()["sets_on_hand"] == 4
+
+        # invalid counts rejected; a null patch leaves the count alone (older clients)
+        assert c.patch(f"/api/gear/{strings_id}", json={"sets_on_hand": -1}).status_code == 422
+        assert c.patch(f"/api/gear/{strings_id}", json={"sets_on_hand": None}).json()["sets_on_hand"] == 4
+        # untracked strings report no state
+        untracked = add_strings(c)
+        assert untracked["sets_on_hand"] is None and untracked["stock_state"] is None
+
+
+def test_maintenance_log(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        amp = by_name["Club 20"]["id"]
+        other = by_name["Starling"]["id"]
+
+        r = c.post(f"/api/gear/{amp}/maintenance", json={"category": "tubes", "note": "New EL84s, biased"})
+        assert r.status_code == 201
+        entry = r.json()
+        assert entry["date"] == date.today().isoformat() and entry["logged_by"] == "admin-test"
+        rows = c.get(f"/api/gear/{amp}/maintenance").json()
+        assert len(rows) == 1 and rows[0]["category"] == "tubes"
+        # the log is per item
+        assert c.get(f"/api/gear/{other}/maintenance").json() == []
+        assert c.get("/api/gear/999/maintenance").status_code == 404
+
+        # edit any field
+        r = c.patch(f"/api/maintenance/{entry['id']}", json={"category": "repair", "note": "Fixed hum"})
+        assert r.json()["category"] == "repair" and r.json()["note"] == "Fixed hum"
+        r = c.patch(f"/api/maintenance/{entry['id']}", json={"date": days_ago(10)})
+        assert r.json()["date"] == days_ago(10)
+        assert c.patch("/api/maintenance/999", json={"note": "x"}).status_code == 404
+
+        # categories are fixed, no future dates
+        assert c.post(f"/api/gear/{amp}/maintenance", json={"category": "paint"}).status_code == 422
+        future = (date.today() + timedelta(days=1)).isoformat()
+        assert c.post(f"/api/gear/{amp}/maintenance", json={"date": future}).status_code == 400
+        assert c.patch(f"/api/maintenance/{entry['id']}", json={"date": future}).status_code == 400
+
+        # works over the token API too
+        token = c.post("/api/tokens", json={"name": "maint"}).json()["token"]
+        h = {"Authorization": f"Bearer {token}"}
+        r = c.post(f"/api/v1/gear/{amp}/maintenance", headers=h, json={"category": "setup", "note": "Setup"})
+        assert r.status_code == 201
+        vid = r.json()["id"]
+        assert len(c.get(f"/api/v1/gear/{amp}/maintenance", headers=h).json()) == 2
+        assert c.patch(f"/api/v1/maintenance/{vid}", headers=h, json={"note": "Intonated"}).json()["note"] == "Intonated"
+        assert c.delete(f"/api/v1/maintenance/{vid}", headers=h).json() == {"ok": True}
+        assert "maintenance" in str(c.get("/api/v1/openapi.json").json())
+
+        # deleting gear takes its log along (foreign key cascade)
+        assert c.delete(f"/api/gear/{amp}").status_code == 200
+        with main.db() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM maintenance").fetchone()[0] == 0
+
+
+def test_manual_link(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        r = c.post("/api/gear", json={"type": "amp", "name": "Amp", "manual_url": "https://example.com/manual.pdf"})
+        assert r.status_code == 201 and r.json()["manual_url"] == "https://example.com/manual.pdf"
+        gid = r.json()["id"]
+        # only http(s) links
+        assert c.post("/api/gear", json={"type": "amp", "name": "Amp2", "manual_url": "ftp://x"}).status_code == 422
+        assert c.patch(f"/api/gear/{gid}", json={"manual_url": "not a url"}).status_code == 422
+        # blank clears it, null leaves it alone
+        assert c.patch(f"/api/gear/{gid}", json={"manual_url": ""}).json()["manual_url"] == ""
+        assert c.patch(f"/api/gear/{gid}", json={"manual_url": "https://example.com/m"}).json()["manual_url"] == "https://example.com/m"
+        assert c.patch(f"/api/gear/{gid}", json={"manual_url": None}).json()["manual_url"] == "https://example.com/m"
+
+
+def test_export_downloads_everything(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        assert c.get("/api/export").status_code == 401
+        setup_admin(c)
+        by_name = seed_ids(c)
+        amp = by_name["Club 20"]["id"]
+        c.post(f"/api/gear/{amp}/maintenance", json={"category": "tubes", "note": "Retube"})
+        r = c.get("/api/export")
+        assert r.status_code == 200
+        assert 'attachment; filename="gearsmith-export-' in r.headers["content-disposition"]
+        data = r.json()
+        assert data["app"] == "Gearsmith" and data["version"] == main.APP_VERSION
+        assert len(data["gear"]) == 7
+        demo = next(g for g in data["gear"] if g["name"] == "Demo Strings 10-46")
+        assert demo["sets_on_hand"] == 3
+        assert len(data["restrings"]) == 2 and data["sets"][0]["name"] == "Practice board"
+        assert len(data["maintenance"]) == 1 and data["maintenance"][0]["note"] == "Retube"
+        assert data["songs"] == [] and data["presets"] == []
+
+
+def test_tuner_feature_toggle(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        assert c.get("/api/settings").json()["feature_tuner"] is True
+        assert c.put("/api/settings", json={"feature_tuner": False}).json()["feature_tuner"] is False
+        assert c.put("/api/settings", json={"feature_tuner": True}).json()["feature_tuner"] is True
+
+
+def test_controls_carry_settings(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        amp = seed_ids(c)["Club 20"]["id"]
+        r = c.patch(f"/api/gear/{amp}", json={"specs": {"controls": [
+            {"name": "Gain", "kind": "knob", "value": "6"},
+            {"name": "Master", "kind": "knob", "value": "noon"},
+            {"name": "Reverb", "kind": "knob"},
+        ]}})
+        assert r.status_code == 200
+        controls = r.json()["controls"]
+        assert controls[0]["value"] == "6" and controls[1]["value"] == "noon"
+        assert "value" not in controls[2]
+        # a later spec edit keeps the settings; a re-save can clear one
+        c.patch(f"/api/gear/{amp}", json={"specs": {"speaker": '1x12"'}})
+        assert c.get(f"/api/gear/{amp}").json()["controls"][0]["value"] == "6"
+        r = c.patch(f"/api/gear/{amp}", json={"specs": {"controls": [{"name": "Gain", "kind": "knob"}]}})
+        assert "value" not in r.json()["controls"][0]
+

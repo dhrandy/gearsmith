@@ -152,6 +152,11 @@ h2 { font-size: 18px; margin: 22px 0 10px; }
 .set-member-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .set-card-head { justify-content: space-between; flex-wrap: nowrap; align-items: flex-start; }
 .set-card-head .row { flex: none; flex-wrap: nowrap; }
+.set-card-head .set-name { color: var(--text); text-decoration: none; }
+.set-card-head .set-name:hover { text-decoration: underline; }
+.crumb { margin: 16px 0 -6px; font-size: 14px; }
+.crumb a { text-decoration: none; }
+.crumb a::before { content: "\2039  "; }
 .set-member .thumb { width: 32px; height: 32px; font-size: 15px; border-radius: 999px; }
 .member-pick { display: grid; gap: 6px; max-height: 300px; overflow: auto; margin-top: 8px; }
 .member-pick .row { justify-content: space-between; }

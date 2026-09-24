@@ -363,3 +363,64 @@ def test_token_api_photo_delete_and_cover(tmp_path):
         assert c.delete(f"/api/v1/photos/{other['id']}", headers=h).status_code == 401
         assert c.get(f"/api/v1/gear/{drive}", headers=h).status_code == 401
         assert c.get(f"/api/gear/{drive}").json()["cover"] == other["url"]
+
+
+def test_favorite_flag_round_trip_and_order(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        assert all(g["favorite"] is False for g in by_name.values())
+        starling, heron = by_name["Starling"]["id"], by_name["Heron"]["id"]
+        token = c.post("/api/tokens", json={"name": "fav"}).json()["token"]
+        h = {"Authorization": f"Bearer {token}"}
+
+        # v1 PATCH sets it, both APIs read it back
+        r = c.patch(f"/api/v1/gear/{starling}", headers=h, json={"favorite": True})
+        assert r.status_code == 200 and r.json()["favorite"] is True
+        assert c.get(f"/api/v1/gear/{starling}", headers=h).json()["favorite"] is True
+        assert c.get(f"/api/gear/{starling}").json()["favorite"] is True
+
+        # favorites sort first within their type, then by name
+        guitars = [g["name"] for g in c.get("/api/v1/gear?type=guitar", headers=h).json()]
+        assert guitars == ["Starling", "Heron"]
+        c.patch(f"/api/gear/{heron}", json={"favorite": True})
+        c.patch(f"/api/gear/{starling}", json={"favorite": False})
+        assert [g["name"] for g in c.get("/api/gear?type=guitar").json()] == ["Heron", "Starling"]
+        types = [g["type"] for g in c.get("/api/gear").json()]
+        assert types == sorted(types, key=["amp", "guitar", "pedal", "pick"].index)
+
+        # other edits and a full PUT without the flag leave it alone; null is ignored
+        c.patch(f"/api/gear/{heron}", json={"notes": "keeper"})
+        full = c.get(f"/api/gear/{heron}").json()
+        body = {k: full[k] for k in ("type", "name", "make", "model", "notes", "restring_interval_days")}
+        assert c.put(f"/api/gear/{heron}", json=body).json()["favorite"] is True
+        assert c.patch(f"/api/gear/{heron}", json={"favorite": None}).json()["favorite"] is True
+        assert c.patch(f"/api/gear/{heron}", json={"favorite": "nope"}).status_code == 422
+
+        # can be set on create
+        r = c.post("/api/v1/gear", headers=h, json={"type": "pick", "name": "Fav Pick", "favorite": True})
+        assert r.json()["favorite"] is True
+        assert "favorite" in str(c.get("/api/v1/openapi.json").json()["components"]["schemas"]["GearPatch"])
+
+
+def test_favorite_column_added_to_existing_database(tmp_path):
+    import sqlite3
+
+    main.DB_PATH = tmp_path / "old.db"
+    main.PHOTOS_DIR = tmp_path / "photos"
+    main.PHOTOS_DIR.mkdir()
+    old = sqlite3.connect(main.DB_PATH)
+    old.execute("""CREATE TABLE gear (id INTEGER PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL,
+        make TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', year INTEGER,
+        serial TEXT NOT NULL DEFAULT '', specs TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT '',
+        purchase_date TEXT, purchase_price REAL, notes TEXT NOT NULL DEFAULT '',
+        restring_interval_days INTEGER, created_by INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    old.execute("INSERT INTO gear(type,name,created_at,updated_at) VALUES('amp','Old Amp','x','x')")
+    old.commit()
+    old.close()
+    main.init_db()
+    main.init_db()  # second start is a no-op
+    with main.db() as c:
+        row = c.execute("SELECT name, favorite FROM gear").fetchone()
+    assert (row["name"], row["favorite"]) == ("Old Amp", 0)

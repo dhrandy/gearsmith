@@ -850,3 +850,112 @@ def test_share_qr_backup_and_tuner(app_url, width, height):
         # no sideways scrolling on a phone
         assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_gear_page_previous_and_next(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        order = [h.split("/")[-1] for h in page.locator(".gear-card").evaluate_all("els => els.map((a) => a.getAttribute('href'))")]
+        names = page.locator(".gear-card .gc-name").all_inner_texts()
+        assert len(order) >= 3
+        total = len(order)
+
+        # first item: no previous, next is the second card on the Gear page
+        page.locator(".gear-card").first.click()
+        expect(page.get_by_role("heading", name=names[0], exact=True)).to_be_visible()
+        pager = page.locator("#gd-pager")
+        expect(pager.locator(".pager-count")).to_have_text(f"1 of {total}")
+        expect(page.locator("#gd-prev")).to_have_count(0)
+        expect(page.locator("#gd-next")).to_have_attribute("aria-label", f"Next: {names[1]}")
+        page.screenshot(path=f"/tmp/pager-first-{width}.png")
+
+        page.locator("#gd-next").click()
+        expect(page.get_by_role("heading", name=names[1], exact=True)).to_be_visible()
+        expect(pager.locator(".pager-count")).to_have_text(f"2 of {total}")
+        page.get_by_role("link", name=f"Next: {names[2]}").click()
+        expect(page.get_by_role("heading", name=names[2], exact=True)).to_be_visible()
+        page.get_by_role("link", name=f"Previous: {names[1]}").click()
+        expect(page.get_by_role("heading", name=names[1], exact=True)).to_be_visible()
+        assert page.url.endswith(f"#/gear/{order[1]}")
+        page.screenshot(path=f"/tmp/pager-middle-{width}.png")
+        assert_no_overflow(page, "gear page with previous/next")
+
+        # the row stays slim: one line, above the title
+        box = pager.bounding_box()
+        title = page.locator(".pagehead h1").bounding_box()
+        assert box["height"] <= 48 and box["y"] + box["height"] <= title["y"] + 1
+        if width < 650:
+            expect(pager.locator(".pager-name").first).to_be_hidden()
+        else:
+            expect(pager.locator(".pager-name").first).to_be_visible()
+
+        # arrow keys step through too, but not while typing in a field
+        page.keyboard.press("ArrowRight")
+        expect(page.get_by_role("heading", name=names[2], exact=True)).to_be_visible()
+        page.keyboard.press("ArrowLeft")
+        expect(page.get_by_role("heading", name=names[1], exact=True)).to_be_visible()
+
+        # last item: no next
+        page.goto(app_url + f"/#/gear/{order[-1]}")
+        expect(pager.locator(".pager-count")).to_have_text(f"{total} of {total}")
+        expect(page.locator("#gd-next")).to_have_count(0)
+
+        # a filtered Gear page is the list you walk
+        page.goto(app_url + "/#/")
+        page.locator("#gear-search").fill("Starling")
+        expect(page.locator(".gear-card")).to_have_count(1)
+        page.locator(".gear-card").first.click()
+        expect(page.get_by_role("heading", name="Starling", exact=True)).to_be_visible()
+        expect(page.locator("#gd-pager")).to_have_count(0)
+
+        # opened fresh (bookmark, another device): the full list for its section
+        page.evaluate("sessionStorage.clear()")
+        page.reload()
+        expect(page.get_by_role("heading", name="Starling", exact=True)).to_be_visible()
+        expect(page.locator("#gd-pager .pager-count")).to_have_text(re.compile(rf"^\d+ of {total}$"))
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_tuner_alternate_tunings(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"])
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        page.get_by_role("link", name="Tuner", exact=True).click()
+        picker = page.get_by_label("Tuning")
+        chips = page.locator("#tuner-strings .tuner-string b")
+
+        # standard by default, low string to high
+        expect(picker).to_have_value("standard")
+        expect(chips).to_have_text(["E2", "A2", "D3", "G3", "B3", "E4"])
+
+        # drop D drops the low string and the choice sticks
+        picker.select_option("drop-d")
+        expect(chips).to_have_text(["D2", "A2", "D3", "G3", "B3", "E4"])
+        page.reload()
+        expect(page.get_by_label("Tuning")).to_have_value("drop-d")
+        picker.select_option("drop-c")
+        expect(chips).to_have_text(["C2", "G2", "C3", "F3", "A3", "D4"])
+
+        # readings aim at the nearest target string
+        low_c = page.evaluate("targetFor(65.41, 'drop-c')")
+        assert low_c["string"] == 6 and low_c["name"] == "C" and abs(low_c["cents"]) <= 1
+        sharp_d = page.evaluate("targetFor(75.5, 'drop-d')")
+        assert sharp_d["string"] == 6 and sharp_d["cents"] > 40
+        assert page.evaluate("targetFor(196.0, 'open-g')")["string"] == 3
+        assert page.evaluate("targetFor(110, 'chromatic')") is None
+
+        page.get_by_role("button", name="Start tuning").click()
+        expect(page.get_by_role("button", name="Stop")).to_be_visible()
+        expect(page.locator("#tuner-error")).to_have_text("")
+        page.screenshot(path=f"/tmp/tuner-dropc-{width}.png", full_page=True)
+        assert_no_overflow(page, "tuner with tuning picker")
+
+        # chromatic mode has no target strings
+        picker.select_option("chromatic")
+        expect(page.locator("#tuner-strings")).to_be_hidden()
+        browser.close()

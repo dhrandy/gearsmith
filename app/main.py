@@ -2498,10 +2498,38 @@ def preset_summary(c, row) -> dict[str, Any]:
         "amp_name": row["amp_name"],
         "notes": row["notes"],
         "song_count": preset_song_count(c, row["id"]),
+        "chain_summary": chain_summary(c, row["id"], PRESET),
         "added_by": display_user(c, row["created_by"]) or "System",
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def chain_summary(c, owner_id: int, o: Owner) -> list[str]:
+    """Short names for a chain in signal order, for list cards.
+
+    Gear settings give the gear's name. A modeler patch gives its enabled block models,
+    or the patch name (or device name) when it has no blocks.
+    """
+    names: list[str] = []
+    for r in c.execute(
+        f"SELECT gear_name FROM {o.rig} WHERE {o.col}=? ORDER BY position, id", (owner_id,)
+    ).fetchall():
+        names.append(r["gear_name"])
+    for p in c.execute(
+        f"SELECT id, gear_name, patch_name FROM {o.patches} WHERE {o.col}=? ORDER BY position, id",
+        (owner_id,),
+    ).fetchall():
+        models = [
+            b["model"]
+            for b in c.execute(
+                f"SELECT model FROM {o.blocks} WHERE patch_id=? AND enabled=1 ORDER BY position, id",
+                (p["id"],),
+            ).fetchall()
+            if b["model"]
+        ]
+        names.extend(models or [p["patch_name"] or p["gear_name"]])
+    return [n for n in names if n]
 
 
 def preset_dict(c, row, with_songs: bool = True) -> dict[str, Any]:

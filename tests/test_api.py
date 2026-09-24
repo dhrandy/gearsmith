@@ -42,7 +42,7 @@ def test_setup_seed_and_auth(tmp_path):
         assert c.post("/api/setup", json={"username": "x-user", "password": "password-123"}).status_code == 409
         gear = c.get("/api/gear").json()
         names = {g["name"] for g in gear}
-        assert {"Starling", "Heron", "Club 20", "Demo Drive", "Demo Delay", "DemoPick 0.73"} == names
+        assert {"Starling", "Heron", "Club 20", "Demo Drive", "Demo Delay", "DemoPick 0.73", "Demo Strings 10-46"} == names
         r = c.get("/")
         assert "default-src 'self'" in r.headers["content-security-policy"]
         assert r.headers["x-frame-options"] == "DENY"
@@ -388,7 +388,7 @@ def test_favorite_flag_round_trip_and_order(tmp_path):
         c.patch(f"/api/gear/{starling}", json={"favorite": False})
         assert [g["name"] for g in c.get("/api/gear?type=guitar").json()] == ["Heron", "Starling"]
         types = [g["type"] for g in c.get("/api/gear").json()]
-        assert types == sorted(types, key=["amp", "guitar", "pedal", "pick"].index)
+        assert types == sorted(types, key=["amp", "guitar", "pedal", "pick", "strings"].index)
 
         # other edits and a full PUT without the flag leave it alone; null is ignored
         c.patch(f"/api/gear/{heron}", json={"notes": "keeper"})
@@ -856,9 +856,209 @@ def test_existing_songs_database_gets_preset_tables(tmp_path):
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         gear_count = conn.execute("SELECT COUNT(*) FROM gear").fetchone()[0]
     assert {"presets", "preset_gear_settings", "preset_device_patches", "preset_effect_blocks", "song_presets"} <= tables
-    assert gear_count == 6
+    assert gear_count == 7
     with TestClient(main.app) as c:
         c.post("/api/login", json={"username": "admin-test", "password": "password-123"})
         song = c.get("/api/songs").json()[0]
         assert song["title"] == "Kept" and song["preset_names"] == []
         assert c.get(f"/api/songs/{song['id']}").json()["rig"][0]["knobs"][0]["value"] == "1:00"
+
+
+def add_strings(c, headers=None, **kw):
+    body = {
+        "type": "strings", "name": "Test Strings 10-52", "make": "Test Brand", "model": "Heavy Bottom",
+        "status": "home",
+        "specs": {"gauge": "10-52", "string_type": "Electric", "material": "Nickel wound",
+                  "strings_per_set": "6", "sets_per_pack": 3},
+    }
+    body.update(kw)
+    r = c.post("/api/v1/gear" if headers else "/api/gear", json=body, headers=headers or {})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_strings_gear_type(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        s = add_strings(c)
+        assert s["type"] == "strings" and s["type_label"] == "Strings" and s["type_singular"] == "Strings"
+        assert s["specs"] == {"gauge": "10-52", "string_type": "electric", "material": "Nickel wound",
+                              "strings_per_set": 6, "sets_per_pack": 3}
+        assert [f["key"] for f in s["spec_fields"]] == ["gauge", "string_type", "material", "strings_per_set", "sets_per_pack"]
+        assert s["used_on"] == [] and s["strings_used"] is None and s["strings"] is None
+
+        # spec validation: string type is one of four, counts are numbers, other types' fields are dropped
+        bad = c.post("/api/gear", json={"type": "strings", "name": "X", "specs": {"string_type": "banjo"}})
+        assert bad.status_code == 400 and "electric" in bad.json()["detail"]
+        assert c.post("/api/gear", json={"type": "strings", "name": "X", "specs": {"sets_per_pack": "lots"}}).status_code == 400
+        odd = c.post("/api/gear", json={"type": "strings", "name": "Bass set", "specs": {"string_type": "bass", "thickness": "1mm"}}).json()
+        assert odd["specs"] == {"string_type": "bass"}
+        assert c.patch(f"/api/gear/{odd['id']}", json={"specs": {"string_type": "classical"}}).json()["specs"]["string_type"] == "classical"
+        assert c.post("/api/gear", json={"type": "strings", "name": "X", "restring_interval_days": 30}).status_code == 400
+
+        # type filter and search (search looks at spec values like the gauge)
+        assert {g["name"] for g in c.get("/api/gear?type=strings").json()} == {"Demo Strings 10-46", "Test Strings 10-52", "Bass set"}
+        assert [g["name"] for g in c.get("/api/gear?q=10-52").json()] == ["Test Strings 10-52"]
+        assert [g["name"] for g in c.get("/api/gear?type=strings&q=heavy").json()] == ["Test Strings 10-52"]
+        assert c.get("/api/gear?q=100%25").json() == []
+
+        # photos: upload, cover
+        p1 = c.post(f"/api/gear/{s['id']}/photos", files={"photo": ("a.png", PNG, "image/png")}).json()
+        g = c.get(f"/api/gear/{s['id']}").json()
+        assert len(g["photos"]) == 1 and g["cover"] == p1["url"]
+
+        # share page calls the maker a brand
+        share = c.post(f"/api/gear/{s['id']}/share", json={}).json()["share"]
+        page = c.get(share["url"]).text
+        assert "Brand" in page and "Test Brand" in page and "10-52" in page and ">Strings<" in page
+
+        # feature toggle exists and can be switched off
+        assert c.get("/api/settings").json()["feature_strings"] is True
+        assert c.put("/api/settings", json={"feature_strings": False}).json()["feature_strings"] is False
+
+
+def test_strings_over_token_api(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        token = c.post("/api/tokens", json={"name": "strings"}).json()["token"]
+        h = {"Authorization": f"Bearer {token}"}
+        s = add_strings(c, headers=h)
+        assert c.get(f"/api/v1/gear/{s['id']}", headers=h).json()["specs"]["gauge"] == "10-52"
+        assert [g["id"] for g in c.get("/api/v1/gear?type=strings&q=10-52", headers=h).json()] == [s["id"]]
+        r = c.patch(f"/api/v1/gear/{s['id']}", headers=h, json={"specs": {"sets_per_pack": 2}})
+        assert r.json()["specs"]["sets_per_pack"] == 2
+        photo = c.post(f"/api/v1/gear/{s['id']}/photos", headers=h, files={"photo": ("a.png", PNG, "image/png")})
+        assert photo.status_code == 201
+        assert len(c.get(f"/api/v1/gear/{s['id']}", headers=h).json()["photos"]) == 1
+        schema = str(c.get("/api/v1/openapi.json").json())
+        assert "strings" in schema and "strings_id" in schema
+        assert c.delete(f"/api/v1/gear/{s['id']}", headers=h).json() == {"ok": True}
+        assert c.get(f"/api/v1/gear/{s['id']}", headers=h).status_code == 404
+
+
+def test_guitars_pick_their_strings(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        heron, club = by_name["Heron"]["id"], by_name["Club 20"]["id"]
+        demo = by_name["Demo Strings 10-46"]
+        # the demo guitar already points at the demo strings
+        assert by_name["Starling"]["strings_used"]["id"] == demo["id"]
+        assert [u["name"] for u in demo["used_on"]] == ["Starling"]
+        s = add_strings(c)
+
+        # a guitar can pick a strings item; nothing else can, and it must be a strings item
+        g = c.patch(f"/api/gear/{heron}", json={"strings_id": s["id"]}).json()
+        assert g["strings_id"] == s["id"] and g["strings_used"]["gauge"] == "10-52"
+        assert c.patch(f"/api/gear/{heron}", json={"strings_id": club}).status_code == 400
+        assert c.patch(f"/api/gear/{heron}", json={"strings_id": 99999}).status_code == 400
+        assert c.patch(f"/api/gear/{club}", json={"strings_id": s["id"]}).status_code == 400
+        assert c.post("/api/gear", json={"type": "amp", "name": "A", "strings_id": s["id"]}).status_code == 400
+        new_guitar = c.post("/api/gear", json={"type": "guitar", "name": "New One", "strings_id": s["id"]}).json()
+        assert new_guitar["strings_used"]["id"] == s["id"]
+        assert {u["name"] for u in c.get(f"/api/gear/{s['id']}").json()["used_on"]} == {"Heron", "New One"}
+
+        # a full PUT that leaves strings_id out keeps it; one that sends null clears it
+        full = c.get(f"/api/gear/{heron}").json()
+        body = {k: full[k] for k in ("type", "name", "make", "model", "notes", "restring_interval_days")}
+        assert c.put(f"/api/gear/{heron}", json=body).json()["strings_id"] == s["id"]
+        assert c.put(f"/api/gear/{new_guitar['id']}", json={"type": "guitar", "name": "New One", "strings_id": None}).json()["strings_id"] is None
+
+        # logging a restring from a strings item fills brand and gauge and switches the guitar to it
+        r = c.post(f"/api/gear/{heron}/restrings", json={"strings_id": demo["id"], "note": "fresh"})
+        assert r.status_code == 201
+        rs = r.json()
+        assert (rs["brand"], rs["gauge"], rs["strings_id"]) == ("Demo Strings", "10-46", demo["id"])
+        assert rs["strings"]["name"] == "Demo Strings 10-46"
+        g = c.get(f"/api/gear/{heron}").json()
+        assert g["strings_id"] == demo["id"] and g["specs"]["string_gauge"] == "10-46"
+        assert g["strings"]["last_strings"]["id"] == demo["id"] and g["strings"]["days"] == 0
+        # typed values win over the item's
+        r = c.post(f"/api/gear/{heron}/restrings", json={"strings_id": s["id"], "gauge": "10-50"}).json()
+        assert (r["brand"], r["gauge"]) == ("Test Brand", "10-50")
+        # free text still works and leaves the guitar's strings alone
+        r = c.post(f"/api/gear/{heron}/restrings", json={"brand": "Other", "gauge": "11-49"}).json()
+        assert r["strings_id"] is None and r["strings"] is None
+        assert c.get(f"/api/gear/{heron}").json()["strings_id"] == s["id"]
+        assert c.post(f"/api/gear/{heron}/restrings", json={"strings_id": club}).status_code == 400
+
+        # token API: same fields
+        token = c.post("/api/tokens", json={"name": "rs"}).json()["token"]
+        h = {"Authorization": f"Bearer {token}"}
+        r = c.post(f"/api/v1/gear/{heron}/restrings", headers=h, json={"strings_id": demo["id"]}).json()
+        assert r["strings_id"] == demo["id"] and r["via"] == "api"
+        assert c.get(f"/api/v1/gear/{heron}/restrings", headers=h).json()[0]["strings"]["id"] == demo["id"]
+        assert c.patch(f"/api/v1/gear/{heron}", headers=h, json={"strings_id": s["id"]}).json()["strings_id"] == s["id"]
+
+        # deleting the strings item keeps the history text and unlinks it
+        assert c.delete(f"/api/gear/{s['id']}").json() == {"ok": True}
+        g = c.get(f"/api/gear/{heron}").json()
+        assert g["strings_id"] is None and g["strings_used"] is None
+        history = c.get(f"/api/gear/{heron}/restrings").json()
+        assert len(history) == 5 and all(x["strings_id"] != s["id"] for x in history)
+        assert any(x["brand"] == "Test Brand" and x["gauge"] == "10-50" for x in history)
+
+
+def test_v030_database_upgrade_keeps_every_row(tmp_path):
+    """A real v0.3.0 schema (with the old four-type CHECK) upgrades without losing anything."""
+    import sqlite3
+    from pathlib import Path
+
+    main.DB_PATH = tmp_path / "gearsmith.db"
+    main.PHOTOS_DIR = tmp_path / "photos"
+    main.PHOTOS_DIR.mkdir()
+    old = sqlite3.connect(main.DB_PATH)
+    old.executescript((Path(__file__).parent / "schema_v0_3_0.sql").read_text())
+    old.executescript("""
+        INSERT INTO users(id,username,password_hash,salt,is_admin,created_at) VALUES(1,'admin-test','x','y',1,'t');
+        INSERT INTO gear(id,type,name,make,specs,status,restring_interval_days,favorite,lifecycle,created_by,created_at,updated_at)
+          VALUES(5,'guitar','Old Guitar','Maker','{"string_gauge": "10-46"}','home',90,1,'owned',1,'t','t'),
+                (9,'amp','Old Amp','','{"wattage": "20W"}','',NULL,0,'owned',1,'t','t'),
+                (12,'pedal','Old Pedal','','{"voltage": "9V"}','lent',NULL,0,'want',NULL,'t','t'),
+                (40,'pick','Old Pick','','{"quantity": 3}','home',NULL,0,'sold',NULL,'t','t');
+        INSERT INTO gear_photos(id,gear_id,filename,sort,created_at) VALUES(7,5,'a.jpg',0,'t'),(8,40,'b.jpg',0,'t');
+        INSERT INTO restrings(id,gear_id,brand,gauge,date,note,user_id,via,created_at)
+          VALUES(3,5,'Some Brand','10-46','2026-01-02','kept',1,'','t');
+        INSERT INTO sets(id,name,notes,created_at,updated_at) VALUES(2,'Board','','t','t');
+        INSERT INTO set_items(set_id,gear_id,sort) VALUES(2,9,0),(2,12,1);
+        INSERT INTO songs(id,title,artist,created_at,updated_at) VALUES(4,'Old Song','Band','t','t');
+        INSERT INTO song_gear_settings(id,song_id,gear_id,gear_name,knobs,position) VALUES(6,4,9,'Old Amp','[{"name":"Gain","value":"5"}]',0);
+    """)
+    old.commit()
+    tables = [r[0] for r in old.execute("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+    before = {t: old.execute(f"SELECT * FROM {t} ORDER BY rowid").fetchall() for t in tables}
+    old.close()
+
+    main.init_db()
+    main.init_db()  # second start changes nothing and makes no second backup
+    backups = sorted(p.name for p in tmp_path.glob("gearsmith-backup-*.db"))
+    assert backups == ["gearsmith-backup-before-0.3.1.db"]
+    with sqlite3.connect(tmp_path / backups[0]) as b:
+        assert b.execute("SELECT COUNT(*) FROM gear").fetchone()[0] == 4
+
+    with main.db() as conn:
+        conn.row_factory = None
+        for t in tables:
+            cols = [r[1] for r in conn.execute(f"PRAGMA table_info({t})") if r[1] != "strings_id"]
+            after = conn.execute(f"SELECT {', '.join(cols)} FROM {t} ORDER BY rowid").fetchall()
+            assert after == before[t], t
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert "'strings'" in conn.execute("SELECT sql FROM sqlite_master WHERE name='gear'").fetchone()[0]
+
+    # the API still reads the old rows and takes a strings item, then links it to the old guitar
+    with main.db() as conn:
+        pw, salt = main.password_record("password-123")
+        conn.execute("UPDATE users SET password_hash=?, salt=? WHERE id=1", (pw, salt))
+    with TestClient(main.app) as c:
+        assert c.post("/api/login", json={"username": "admin-test", "password": "password-123"}).status_code == 200
+        g = c.get("/api/gear/5").json()
+        assert g["favorite"] is True and g["strings"]["last_brand"] == "Some Brand" and g["strings_id"] is None
+        s = add_strings(c)
+        assert c.post("/api/gear/5/restrings", json={"strings_id": s["id"]}).status_code == 201
+        assert c.get("/api/gear/5").json()["strings_used"]["id"] == s["id"]
+        assert c.get("/api/songs/4").json()["rig"][0]["gear_id"] == 9
+        assert [i["id"] for i in c.get("/api/sets/2").json()["items"]] == [9, 12]

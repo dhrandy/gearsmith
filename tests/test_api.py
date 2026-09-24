@@ -1002,6 +1002,30 @@ def test_guitars_pick_their_strings(tmp_path):
         assert any(x["brand"] == "Test Brand" and x["gauge"] == "10-50" for x in history)
 
 
+def test_preset_list_carries_a_chain_summary(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        p = c.post("/api/presets", json={
+            "name": "Big Verse (Mini)", "artist": "Band", "amp_id": by_name["Club 20"]["id"],
+            "rig": [{"gear_id": by_name["Demo Drive"]["id"]}, {"gear_name": "Borrowed fuzz"}],
+            "patches": [
+                {"gear_name": "Modeler", "patch_name": "Verse",
+                 "blocks": [{"block_type": "Amp", "model": "Plexi"},
+                            {"block_type": "Delay", "model": "Tape", "enabled": False},
+                            {"block_type": "Reverb", "model": "Room"}]},
+                {"gear_name": "Modeler", "patch_name": "Solo"},
+            ],
+        }).json()
+        want = ["Demo Drive", "Borrowed fuzz", "Plexi", "Room", "Solo"]
+        listed = next(x for x in c.get("/api/presets").json() if x["id"] == p["id"])
+        assert listed["chain_summary"] == want
+        assert c.get(f"/api/presets/{p['id']}").json()["chain_summary"] == want
+        grouped = next(g for g in c.get("/api/artists").json() if g["artist"] == "Band")
+        assert grouped["presets"][0]["chain_summary"] == want
+
+
 def test_v030_database_upgrade_keeps_every_row(tmp_path):
     """A real v0.3.0 schema (with the old four-type CHECK) upgrades without losing anything."""
     import sqlite3

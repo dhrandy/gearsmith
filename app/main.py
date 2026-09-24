@@ -1169,28 +1169,38 @@ async def add_photo(gear_id: int, request: Request, photo: UploadFile = File(...
         return await attach_photo(c, gear_id, photo)
 
 
+def remove_photo(c, photo_id: int) -> dict[str, Any]:
+    row = c.execute("SELECT * FROM gear_photos WHERE id=?", (photo_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Photo not found")
+    unlink_photo(row["filename"])
+    c.execute("DELETE FROM gear_photos WHERE id=?", (photo_id,))
+    c.execute("UPDATE gear SET updated_at=? WHERE id=?", (now_iso(), row["gear_id"]))
+    return {"ok": True}
+
+
+def set_cover(c, photo_id: int) -> dict[str, Any]:
+    row = c.execute("SELECT * FROM gear_photos WHERE id=?", (photo_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Photo not found")
+    c.execute("UPDATE gear_photos SET sort=sort+1 WHERE gear_id=?", (row["gear_id"],))
+    c.execute("UPDATE gear_photos SET sort=0 WHERE id=?", (photo_id,))
+    c.execute("UPDATE gear SET updated_at=? WHERE id=?", (now_iso(), row["gear_id"]))
+    return {"ok": True}
+
+
 @app.delete("/api/photos/{photo_id}")
 def delete_photo(photo_id: int, request: Request):
     current_user(request)
     with db() as c:
-        row = c.execute("SELECT * FROM gear_photos WHERE id=?", (photo_id,)).fetchone()
-        if not row:
-            raise HTTPException(404, "Photo not found")
-        unlink_photo(row["filename"])
-        c.execute("DELETE FROM gear_photos WHERE id=?", (photo_id,))
-        return {"ok": True}
+        return remove_photo(c, photo_id)
 
 
 @app.post("/api/photos/{photo_id}/cover")
 def make_cover(photo_id: int, request: Request):
     current_user(request)
     with db() as c:
-        row = c.execute("SELECT * FROM gear_photos WHERE id=?", (photo_id,)).fetchone()
-        if not row:
-            raise HTTPException(404, "Photo not found")
-        c.execute("UPDATE gear_photos SET sort=sort+1 WHERE gear_id=?", (row["gear_id"],))
-        c.execute("UPDATE gear_photos SET sort=0 WHERE id=?", (photo_id,))
-        return {"ok": True}
+        return set_cover(c, photo_id)
 
 
 @app.get("/api/photos/{name}")
@@ -1529,6 +1539,22 @@ async def v1_add_photo(gear_id: int, request: Request, photo: UploadFile = File(
     token_auth(request)
     with db() as c:
         return await attach_photo(c, gear_id, photo)
+
+
+@app.delete("/api/v1/photos/{photo_id}", tags=["v1"],
+            summary="Delete a photo (photo ids are in the gear item's photos list)")
+def v1_delete_photo(photo_id: int, request: Request):
+    token_auth(request)
+    with db() as c:
+        return remove_photo(c, photo_id)
+
+
+@app.post("/api/v1/photos/{photo_id}/cover", tags=["v1"],
+          summary="Make a photo the cover of its gear item")
+def v1_make_cover(photo_id: int, request: Request):
+    token_auth(request)
+    with db() as c:
+        return set_cover(c, photo_id)
 
 
 def v1_openapi() -> dict[str, Any]:

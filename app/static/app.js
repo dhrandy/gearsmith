@@ -276,11 +276,12 @@ function lifecycleNav(current) {
 }
 
 function lifecycleBadge(g) {
+  const money = featureOn("feature_values");
   if (g.lifecycle === "want") {
-    return `<span class="badge want">Want${g.want_price != null ? " · " + esc(fmtPrice(g.want_price)) : ""}</span>`;
+    return `<span class="badge want">Want${money && g.want_price != null ? " · " + esc(fmtPrice(g.want_price)) : ""}</span>`;
   }
   if (g.lifecycle === "sold") {
-    const bits = ["Sold", g.sold_date ? fmtDate(g.sold_date) : "", g.sold_price != null ? fmtPrice(g.sold_price) : ""].filter(Boolean);
+    const bits = ["Sold", g.sold_date ? fmtDate(g.sold_date) : "", money && g.sold_price != null ? fmtPrice(g.sold_price) : ""].filter(Boolean);
     return `<span class="badge sold">${esc(bits.join(" · "))}</span>`;
   }
   return "";
@@ -313,7 +314,10 @@ async function gearListView(lifecycle = "owned") {
     <div id="gear-sections"></div>`;
   const container = document.getElementById("gear-sections");
   const search = document.getElementById("gear-search");
-  api("/api/collection").then((sum) => renderTotals(document.getElementById("gear-totals"), lifecycle, sum)).catch(() => {});
+  // Settings > Features > Collection value turns the money line off; the prices stay saved.
+  if (featureOn("feature_values")) {
+    api("/api/collection").then((sum) => renderTotals(document.getElementById("gear-totals"), lifecycle, sum)).catch(() => {});
+  }
   const favBtn = document.getElementById("fav-only");
   const stringType = document.getElementById("string-type-filter");
   let onlyFavs = owned && favOnly();
@@ -659,12 +663,14 @@ function gearForm(existing = null, lifecycle = "owned") {
 async function gearDetailView(id) {
   const g = await api(`/api/gear/${id}`);
   const maintenance = featureOn("feature_maintenance");
+  // With Collection value off, prices and values only show in the edit form.
+  const money = featureOn("feature_values");
   const facts = [
     [MAKE_LABEL[g.type], g.make], ["Model", g.model], ["Year", g.year], ["Serial", g.serial],
     ["Strings", g.strings_used ? stringsLabel(g.strings_used) : ""],
     ["Status", g.status_label !== "Unspecified" ? g.status_label : ""],
-    ["Purchased", [fmtDate(g.purchase_date), fmtPrice(g.purchase_price)].filter(Boolean).join(" for ")],
-    ["Value", g.current_value != null ? fmtPrice(g.current_value) + valueChange(g.current_value, g.purchase_price) : ""],
+    ["Purchased", [fmtDate(g.purchase_date), money ? fmtPrice(g.purchase_price) : ""].filter(Boolean).join(" for ")],
+    ["Value", money && g.current_value != null ? fmtPrice(g.current_value) + valueChange(g.current_value, g.purchase_price) : ""],
     ["Added by", g.added_by],
   ].filter(([, v]) => v !== "" && v !== null && v !== undefined);
   const specs = (g.spec_fields || []).filter((f) => f.value !== null && f.value !== undefined && f.value !== "");
@@ -680,8 +686,8 @@ async function gearDetailView(id) {
       </div>
     </div>
     <p class="muted wrap-any">${esc(g.type_singular || TYPE_SINGULAR[g.type])}${g.sets.length ? " · in " + g.sets.map((s) => setLink(s.id, s.name)).join(", ") : ""}</p>
-    ${g.lifecycle === "want" ? `<div class="life-banner want">On your want list${g.want_price != null ? ` · want price ${esc(fmtPrice(g.want_price))}` : ""}</div>` : ""}
-    ${g.lifecycle === "sold" ? `<div class="life-banner sold">Sold${g.sold_date ? ` on ${esc(fmtDate(g.sold_date))}` : ""}${g.sold_price != null ? ` for ${esc(fmtPrice(g.sold_price))}` : ""} · kept as history</div>` : ""}
+    ${g.lifecycle === "want" ? `<div class="life-banner want">On your want list${money && g.want_price != null ? ` · want price ${esc(fmtPrice(g.want_price))}` : ""}</div>` : ""}
+    ${g.lifecycle === "sold" ? `<div class="life-banner sold">Sold${g.sold_date ? ` on ${esc(fmtDate(g.sold_date))}` : ""}${money && g.sold_price != null ? ` for ${esc(fmtPrice(g.sold_price))}` : ""} · kept as history</div>` : ""}
     <div class="hero">
       <div class="hero-photo">${g.cover ? `<img src="${g.cover}" alt="" />` : TYPE_ICON[g.type]}</div>
       <div>
@@ -2553,6 +2559,7 @@ async function settingsView() {
         ["feature_maintenance", "Maintenance (restring tracking)"],
         ["feature_songs", "Songs (rig and tone settings per song)"], ["feature_want", "Want list"],
         ["feature_sold", "Sold archive"], ["feature_tuner", "Tuner (uses the mic, runs on your device)"],
+        ["feature_values", "Collection value (prices paid, current values and totals)"],
       ].map(([key, label]) => `
         <label class="toggle"><input type="checkbox" data-feature="${key}" ${settings[key] ? "checked" : ""} ${isAdmin ? "" : "disabled"} /> ${label}</label>`).join("")}
     </div>
@@ -2648,7 +2655,8 @@ async function settingsView() {
     });
     view.querySelectorAll("[data-feature]").forEach((box) => box.addEventListener("change", async () => {
       state.settings = await api("/api/settings", { method: "PUT", body: { [box.dataset.feature]: box.checked } });
-      toast(box.checked ? "Section shown" : "Section hidden");
+      const values = box.dataset.feature === "feature_values";
+      toast(box.checked ? (values ? "Values shown" : "Section shown") : (values ? "Values hidden" : "Section hidden"));
       route();
     }));
     document.getElementById("set-notify").addEventListener("submit", async (e) => {

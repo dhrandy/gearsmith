@@ -1,17 +1,19 @@
 # Gearsmith
 
-**Beta** - a simple self-hosted gear tracker for guitarists. Keep your guitars, amps, pedals, and picks in one place, track how old each guitar's strings are, group gear into sets (boards and rigs), and save the exact settings each song needs. One Docker container, SQLite storage, no subscriptions, no cloud account - your data stays on your box.
+**Beta** - a simple self-hosted gear tracker for guitarists. Keep your guitars, amps, pedals, picks, and strings in one place, track how old each guitar's strings are, group gear into sets (boards and rigs), and save the exact settings each song needs. One Docker container, SQLite storage, no subscriptions, no cloud account - your data stays on your box.
 
 ![MIT](https://img.shields.io/badge/license-MIT-green) ![status](https://img.shields.io/badge/status-beta-yellow)
 
 ## What it does
 
-- **Gear inventory** - guitars, amps, pedals, and picks, each with the spec fields that matter:
+- **Gear inventory** - guitars, amps, pedals, picks, and strings, each with the spec fields that matter:
   - Guitars: finish, pickups, nut, scale length, tuning, string gauge, mods, serial, status (home / at the luthier / lent out)
   - Amps: wattage, speaker, tubes, serial
   - Pedals: voltage, current draw (mA), polarity, true bypass vs buffered
   - Picks: thickness, material, how many you've got
+  - Strings: brand, gauge (10-46, 9-42...), type (electric, acoustic, classical, bass), material, strings per set, sets per pack
   - Photos on everything, purchase date and price, notes
+- **Strings on each guitar** - every guitar can pick the strings it uses from your Strings section, and each strings page lists the guitars using it. When you log a restring, pick the strings from a list and the brand and gauge fill in (or just type them). Deleting a strings item keeps the brand and gauge on old restring entries.
 - **Restring tracking** - log a restring (brand, gauge, date) and each guitar gets a "strings: N days" chip that turns yellow as the interval nears and red when it's overdue. Every guitar has its own restring interval.
 - **Favorites** - tap the star on any card or on the gear page to mark a favorite. Favorites sit at the top of their section, and the "Favorites only" button on the Gear page hides everything else (it remembers your choice on that device).
 - **Songs** - a recall sheet for every song you play: tuning, capo, key, BPM, the guitar and amp, and the knob settings on each pedal and amp in the chain (on, off, or toggled mid-song). Knob positions are free text, so "2:00", "noon", "max", and "7.5" all work. Multi-effects units and modelers (Helix, Quad Cortex, Kemper, and so on) get patch pointers instead: patch number and name, scenes, MIDI notes, and an optional list of effect blocks. Add photos of your board or a handwritten sheet. Each gear page lists the songs that use it.
@@ -22,6 +24,7 @@
 - **Share links** - make a read-only link to one piece of gear or a whole set to send to a buyer, a tech, or a friend. Links use a random token, can expire (7, 30, or 90 days, or never), and can be turned off or replaced at any time. Shared pages hide serial numbers and prices, show no links back into your app, and tell search engines not to index them.
 - **Sets** - group gear into rigs: a pedalboard, a gig rig, a recording chain. Gear can live in several sets or none.
 - **Notifications** - Apprise alerts (ntfy, Pushover, Telegram, and 100+ others) when a guitar's strings pass their interval, with quiet hours and overdue repeats.
+- **Search and filters** - the Gear page search matches names, makes, models, and spec values like a gauge, and a string-type filter narrows the Strings section. The API takes the same search as `?q=`.
 - **Hideable sections** - don't have pedals? Don't care about songs or a wish list? Turn the section off in Settings > Features and it leaves the interface. Hidden sections keep their data.
 - **Multi-user** - admin plus member accounts, everyone with their own login.
 - **Token API** - per-user API tokens and interactive docs at `/api/docs`, so you can log a restring or read your collection from anywhere: a script, a shortcut, or an AI assistant.
@@ -75,6 +78,10 @@ Any reverse proxy works (nginx, Caddy, Traefik, Synology's built-in one). Point 
 2. Set `FORWARDED_ALLOW_IPS` to your proxy's IP so login rate limiting sees real client IPs.
 3. In Settings > Notifications, set the public app address so notification links point at your URL.
 
+### Upgrading
+
+Pull the new image and recreate the container; your data volume carries over. When an upgrade has to reshape the database (0.3.1 does, once, to add the strings type), Gearsmith first writes a full copy of it next to the original, named like `gearsmith-backup-before-0.3.1.db`. Once you're happy with the new version you can delete that file.
+
 ## Notifications
 
 Settings > Notifications takes any [Apprise](https://github.com/caronc/apprise) URLs, one per line - `ntfy://ntfy.sh/your-topic`, `pover://user@token`, `tgram://...`, and so on. Gearsmith sends when a guitar passes its restring interval, once when it flips overdue and then every N days (your choice) until you log the restring. Send hour and quiet hours are configurable, and there's a test button.
@@ -89,12 +96,15 @@ To connect an AI assistant, paste it something like this, with your own URL and 
 You can manage my guitar gear through the Gearsmith API at https://YOUR-URL-HERE.
 Authenticate every request with the header: Authorization: Bearer YOUR-TOKEN-HERE
 The interactive docs are at /api/docs and the OpenAPI spec at /api/v1/openapi.json.
-Gear: list and add (GET/POST /api/v1/gear, filter the list with ?lifecycle=owned, want or
-sold), read one item (GET /api/v1/gear/{id}), update it (PATCH /api/v1/gear/{id}). Every item
+Gear: list and add (GET/POST /api/v1/gear, filter the list with ?type=guitar, amp, pedal, pick
+or strings, ?lifecycle=owned, want or sold, and ?q= to search names and specs), read one item (GET /api/v1/gear/{id}), update it (PATCH /api/v1/gear/{id}). Every item
 has "favorite" (true/false) and "lifecycle" (owned, want or sold); want items can carry
 want_price, sold items sold_date and sold_price. Pedals and amps can list their knob names in
-specs.controls, and specs.modeler marks a multi-effects unit.
-Restrings: log one (POST /api/v1/gear/{id}/restrings with brand, gauge and optional date) and
+specs.controls, and specs.modeler marks a multi-effects unit. Strings items (type "strings")
+use make for the brand and specs gauge, string_type (electric, acoustic, classical or bass),
+material, strings_per_set and sets_per_pack. A guitar's strings_id points at the strings it uses.
+Restrings: log one (POST /api/v1/gear/{id}/restrings with brand, gauge and optional date, or
+strings_id to fill brand and gauge from a strings item and switch the guitar to it) and
 check what's due (GET /api/v1/due). Sets: GET/POST /api/v1/sets.
 Photos: attach one (POST /api/v1/gear/{id}/photos, multipart field "photo"), delete one
 (DELETE /api/v1/photos/{photo_id}), or make one the cover (POST /api/v1/photos/{photo_id}/cover).

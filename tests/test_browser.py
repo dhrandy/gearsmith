@@ -744,3 +744,109 @@ def test_preset_cards_show_rig_tag_and_chain(app_url, width, height):
         expect(page.locator(".preset-card .rig-tag", has_text="Ampero Mini")).to_be_visible()
         assert_no_overflow(page, "presets list")
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_stock_countdown_manual_link_and_maintenance(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+
+        # the strings card shows the stock badge
+        card = page.locator(".gear-card", has_text="Demo Strings 10-46")
+        expect(card.get_by_text("3 sets on hand")).to_be_visible()
+
+        # the strings page adjusts the count by hand
+        card.click()
+        expect(page.get_by_role("heading", name="Stock", exact=True)).to_be_visible()
+        page.get_by_role("button", name="One fewer set").click()
+        expect(page.locator("#gd-stock").get_by_text("2 sets on hand")).to_be_visible()
+        page.once("dialog", lambda d: d.accept("1"))
+        page.get_by_role("button", name="Set count").click()
+        expect(page.locator("#gd-stock").get_by_text("1 set left")).to_be_visible()
+
+        # a restring with these strings uses the last set: the page flags it out of stock
+        page.goto(app_url + "/#/")
+        page.locator(".gear-card", has_text="Heron").click()
+        page.get_by_role("button", name="Log a restring").click()
+        page.locator("#rs-strings").select_option(label="Demo Strings 10-46")
+        page.get_by_role("button", name="Log restring").click()
+        expect(page.locator("#gd-strings-used").get_by_role("link", name="Demo Strings 10-46")).to_be_visible()
+        page.locator("#gd-strings-used").get_by_role("link", name="Demo Strings 10-46").click()
+        expect(page.locator("#gd-stock").get_by_text("Out of sets")).to_be_visible()
+        page.screenshot(path=f"/tmp/stock-detail-{width}.png", full_page=True)
+
+        # maintenance: log, edit and delete an entry on an amp
+        page.goto(app_url + "/#/")
+        page.locator(".gear-card", has_text="Club 20").click()
+        expect(page.get_by_role("heading", name="Maintenance", exact=True)).to_be_visible()
+        page.get_by_role("button", name="Log maintenance").click()
+        page.locator("#mt-cat").select_option("tubes")
+        page.locator("#mt-note").fill("New EL84 pair, biased")
+        page.locator("#mt-form").get_by_role("button", name="Log maintenance").click()
+        row = page.locator(".maint-row", has_text="New EL84 pair, biased")
+        expect(row.get_by_text("Tubes", exact=True)).to_be_visible()
+        row.get_by_role("button", name="Edit").click()
+        page.locator("#mt-note").fill("New EL84 pair, biased at 35mA")
+        page.get_by_role("button", name="Save changes").click()
+        expect(page.locator(".maint-row", has_text="biased at 35mA")).to_be_visible()
+        page.screenshot(path=f"/tmp/maintenance-{width}.png", full_page=True)
+        page.locator(".maint-row").get_by_role("button", name="Delete").click()
+        expect(page.get_by_text("Nothing logged yet.")).to_be_visible()
+
+        # manual link: set it in the form, it becomes a button on the page
+        page.get_by_role("button", name="Edit", exact=True).click()
+        page.locator("#gf-manual").fill("https://example.com/club20-manual.pdf")
+        page.get_by_role("button", name="Save changes").click()
+        manual = page.get_by_role("link", name=re.compile("Manual"))
+        expect(manual).to_be_visible()
+        assert manual.get_attribute("href") == "https://example.com/club20-manual.pdf"
+        page.screenshot(path=f"/tmp/manual-link-{width}.png", full_page=True)
+
+        # no sideways scrolling on a phone
+        assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_share_qr_backup_and_tuner(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=["--use-fake-device-for-media-stream", "--use-fake-ui-for-media-stream"])
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+
+        # share QR: make a link, show its QR code
+        page.locator(".gear-card", has_text="Starling").click()
+        page.locator("#gd-share").get_by_role("button", name="Create link").click()
+        page.get_by_role("button", name="QR code").click()
+        expect(page.locator(".qr-box svg")).to_be_visible()
+        page.screenshot(path=f"/tmp/share-qr-{width}.png", full_page=True)
+
+        # settings: backup download and the tuner toggle
+        page.goto(app_url + "/#/settings")
+        backup = page.get_by_role("link", name="Download backup (JSON)")
+        expect(backup).to_be_visible()
+        assert backup.get_attribute("href") == "/api/export"
+
+        # tuner: its tab opens the page and the fake mic starts the readout
+        page.get_by_role("link", name="Tuner", exact=True).click()
+        expect(page.get_by_role("heading", name="Tuner", exact=True)).to_be_visible()
+        page.get_by_role("button", name="Start tuning").click()
+        expect(page.get_by_role("button", name="Stop")).to_be_visible()
+        expect(page.locator("#tuner-error")).to_have_text("")
+        page.screenshot(path=f"/tmp/tuner-{width}.png", full_page=True)
+
+        # hiding the feature drops the tab and closes the route
+        page.goto(app_url + "/#/settings")
+        page.locator("[data-feature=feature_tuner]").uncheck()
+        expect(page.get_by_role("link", name="Tuner", exact=True)).to_be_hidden()
+        page.goto(app_url + "/#/tuner")
+        expect(page.get_by_role("heading", name="Gear", exact=True)).to_be_visible()
+        page.goto(app_url + "/#/settings")
+        page.locator("[data-feature=feature_tuner]").check()
+        expect(page.get_by_role("link", name="Tuner", exact=True)).to_be_visible()
+
+        # no sideways scrolling on a phone
+        assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
+        browser.close()

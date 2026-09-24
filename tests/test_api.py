@@ -1390,3 +1390,33 @@ def test_install_manifest_and_icons(tmp_path):
         page = c.get("/").text
         assert 'rel="apple-touch-icon" sizes="180x180" href="/static/apple-touch-icon.png"' in page
         assert c.get("/static/apple-touch-icon.png").content[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_global_search(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        assert c.get("/api/search", params={"q": "star"}).status_code == 401
+        setup_admin(c)
+        song = c.post("/api/songs", json={"title": "Duck and Run", "artist": "3 Doors Down"}).json()
+        c.post("/api/presets", json={"name": "Kryptonite tone", "artist": "3 Doors Down"})
+        c.post("/api/setlists", json={"name": "Friday gig", "songs": [{"song_id": song["id"]}]})
+
+        r = c.get("/api/search", params={"q": "starling"})
+        assert r.status_code == 200
+        data = r.json()
+        assert [g["name"] for g in data["gear"]] == ["Starling"]
+        assert data["gear"][0]["type"] == "guitar"
+        assert data["songs"] == [] and data["artists"] == []
+
+        data = c.get("/api/search", params={"q": "3 doors"}).json()
+        assert [s["title"] for s in data["songs"]] == ["Duck and Run"]
+        assert [p["name"] for p in data["presets"]] == ["Kryptonite tone"]
+        assert data["artists"] == [{"artist": "3 Doors Down", "song_count": 1, "preset_count": 1}]
+
+        # case-insensitive on sets, and setlists are searched too
+        assert [s["name"] for s in c.get("/api/search", params={"q": "PRACTICE"}).json()["sets"]] == ["Practice board"]
+        assert [s["name"] for s in c.get("/api/search", params={"q": "friday"}).json()["setlists"]] == ["Friday gig"]
+
+        # blank and wildcard-only queries stay literal: no results, no error
+        assert c.get("/api/search", params={"q": "  "}).json()["gear"] == []
+        assert c.get("/api/search", params={"q": "100%"}).json()["gear"] == []

@@ -992,7 +992,8 @@ def test_pedalboard_order_moves_and_drags(app_url, width, height):
         page.get_by_role("button", name="Move Demo Drive later").click()
         expect(pedals).to_have_text(["Demo Tuner", "Demo Delay", "Demo Drive", "Demo Reverb"])
 
-        # drag by the handle: reverb onto the first pedal
+        # drag by the handle: reverb onto the first pedal (wait out the save toast - it covers the handle)
+        expect(page.locator("#toast")).to_be_hidden()
         grip = page.get_by_role("button", name="Drag Demo Reverb")
         target = page.locator(".board-pedal").first.bounding_box()
         box = grip.bounding_box()
@@ -1148,4 +1149,44 @@ def test_price_paid_value_and_collection_total(app_url, width, height):
         page.locator("[data-feature=feature_values]").check()
         page.goto(app_url + "/#/")
         expect(page.locator("#collection-total")).to_contain_text("$1,150")
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_global_search(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        req.post(app_url + "/api/songs", data={"title": "Duck and Run", "artist": "3 Doors Down"})
+        req.post(app_url + "/api/presets", data={"name": "Kryptonite tone", "artist": "3 Doors Down"})
+
+        box = page.locator("#global-search")
+        drop = page.locator("#gsearch-drop")
+        expect(box).to_be_visible()
+
+        # one query groups songs, presets and artists together
+        box.fill("3 doors")
+        expect(drop.locator(".gsr-heading", has_text="Songs")).to_be_visible()
+        expect(drop.locator(".gsr-heading", has_text="Presets")).to_be_visible()
+        expect(drop.locator(".gsr-heading", has_text="Artists")).to_be_visible()
+
+        # clicking a result opens its page and clears the box
+        drop.locator(".gsr-item", has_text="Duck and Run").click()
+        expect(page.get_by_role("heading", name="Duck and Run", exact=True)).to_be_visible()
+        expect(drop).to_be_hidden()
+        expect(box).to_have_value("")
+
+        # gear results open the gear page, from any page
+        box.fill("starling")
+        drop.locator(".gsr-item", has_text="Starling").click()
+        expect(page.get_by_role("heading", name="Starling", exact=True)).to_be_visible()
+
+        # no matches says so, and Escape closes the dropdown
+        box.fill("zzz nothing here")
+        expect(page.locator(".gsr-empty")).to_be_visible()
+        page.keyboard.press("Escape")
+        expect(drop).to_be_hidden()
+
         browser.close()

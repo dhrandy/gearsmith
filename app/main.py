@@ -54,10 +54,14 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 
-GEAR_TYPES = ("guitar", "amp", "pedal", "pick")
-GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks"}
+GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
+GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
+GEAR_TYPE_SINGULAR = {"guitar": "Guitar", "amp": "Amp", "pedal": "Pedal", "pick": "Pick", "strings": "Strings"}
+# Gear types whose make is a brand name on the card and the share page.
+BRAND_TYPES = ("pick", "strings")
+STRING_TYPES = ("electric", "acoustic", "classical", "bass")
 GEAR_STATUS = ("", "home", "luthier", "lent")
 GEAR_STATUS_LABELS = {"": "Unspecified", "home": "Home", "luthier": "At the luthier", "lent": "Lent out"}
 # Lifecycle is separate from status: status says where owned gear is, lifecycle says whether
@@ -96,7 +100,16 @@ SPEC_FIELDS: dict[str, list[tuple[str, str, bool]]] = {
         ("material", "Material", False),
         ("quantity", "Quantity", True),
     ],
+    "strings": [
+        ("gauge", "Gauge", False),
+        ("string_type", "String type", False),
+        ("material", "Material", False),
+        ("strings_per_set", "Strings per set", True),
+        ("sets_per_pack", "Sets per pack", True),
+    ],
 }
+# Spec fields that only take one of a few values.
+SPEC_CHOICES: dict[str, dict[str, tuple[str, ...]]] = {"strings": {"string_type": STRING_TYPES}}
 
 DEFAULT_RESTRING_INTERVAL = 90
 # The strings chip turns yellow at this fraction of the interval, red past it.
@@ -262,7 +275,7 @@ def init_db() -> None:
         );
         CREATE TABLE IF NOT EXISTS gear (
           id INTEGER PRIMARY KEY,
-          type TEXT NOT NULL CHECK (type IN ('guitar','amp','pedal','pick')),
+          type TEXT NOT NULL CHECK (type IN ('guitar','amp','pedal','pick','strings')),
           name TEXT NOT NULL,
           make TEXT NOT NULL DEFAULT '',
           model TEXT NOT NULL DEFAULT '',
@@ -279,6 +292,7 @@ def init_db() -> None:
           want_price REAL,
           sold_date TEXT,
           sold_price REAL,
+          strings_id INTEGER REFERENCES gear(id) ON DELETE SET NULL,
           created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
@@ -299,6 +313,7 @@ def init_db() -> None:
           note TEXT NOT NULL DEFAULT '',
           user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
           via TEXT NOT NULL DEFAULT '',
+          strings_id INTEGER REFERENCES gear(id) ON DELETE SET NULL,
           created_at TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS sets (
@@ -469,6 +484,80 @@ def migrate(c) -> None:
         c.execute("ALTER TABLE gear ADD COLUMN sold_date TEXT")
     if "sold_price" not in gear_cols:
         c.execute("ALTER TABLE gear ADD COLUMN sold_price REAL")
+    # 0.3.1: strings became a gear type, and guitars and restrings can point at a strings item.
+    widen_gear_types(c)
+    if "strings_id" not in gear_cols:
+        c.execute("ALTER TABLE gear ADD COLUMN strings_id INTEGER REFERENCES gear(id) ON DELETE SET NULL")
+    restring_cols = {r["name"] for r in c.execute("PRAGMA table_info(restrings)")}
+    if "strings_id" not in restring_cols:
+        c.execute("ALTER TABLE restrings ADD COLUMN strings_id INTEGER REFERENCES gear(id) ON DELETE SET NULL")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_gear_strings ON gear(strings_id)")
+    c.execute("CREATE INDEX IF NOT EXISTS idx_restrings_strings ON restrings(strings_id)")
+
+
+GEAR_TYPE_CHECK = re.compile(r"CHECK\s*\(\s*type\s+IN\s*\([^)]*\)\s*\)", re.IGNORECASE)
+
+
+def widen_gear_types(c) -> None:
+    """Let an older database store the newer gear types.
+
+    Databases made before 0.3.1 have a CHECK on gear.type that only allows guitar, amp, pedal
+    and pick. SQLite can't change a CHECK in place, so the gear table is rebuilt once: every
+    row is copied with the same id into a new table with the wider CHECK, and the new table
+    takes the old one's name. A backup copy of the whole database is written first. Nothing
+    else changes, and the rows that point at gear (photos, restrings, sets, songs) keep
+    pointing at the same ids.
+    """
+    row = c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='gear'").fetchone()
+    if not row or not GEAR_TYPE_CHECK.search(row[0]):
+        return
+    allowed = ",".join(f"'{t}'" for t in GEAR_TYPES)
+    new_sql = GEAR_TYPE_CHECK.sub(f"CHECK (type IN ({allowed}))", row[0])
+    if new_sql == row[0]:
+        return
+    new_sql = re.sub(r'^\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?["`\[]?gear["`\]]?',
+                     "CREATE TABLE gear_new", new_sql, count=1, flags=re.IGNORECASE)
+    c.commit()
+    backup_database(c, "before-0.3.1")
+    cols = ", ".join(f'"{r["name"]}"' for r in c.execute("PRAGMA table_info(gear)"))
+    level = c.isolation_level
+    c.isolation_level = None  # manage the transaction by hand
+    c.execute("PRAGMA foreign_keys=OFF")
+    try:
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            problems_before = len(c.execute("PRAGMA foreign_key_check").fetchall())
+            count = c.execute("SELECT COUNT(*) FROM gear").fetchone()[0]
+            c.execute("DROP TABLE IF EXISTS gear_new")
+            c.execute(new_sql)
+            c.execute(f"INSERT INTO gear_new ({cols}) SELECT {cols} FROM gear")
+            if c.execute("SELECT COUNT(*) FROM gear_new").fetchone()[0] != count:
+                raise RuntimeError("gear copy lost rows")
+            c.execute("DROP TABLE gear")
+            c.execute("ALTER TABLE gear_new RENAME TO gear")
+            c.execute("CREATE INDEX IF NOT EXISTS idx_gear_type ON gear(type)")
+            if len(c.execute("PRAGMA foreign_key_check").fetchall()) > problems_before:
+                raise RuntimeError("gear rebuild broke a reference")
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    finally:
+        c.execute("PRAGMA foreign_keys=ON")
+        c.isolation_level = level
+
+
+def backup_database(c, label: str) -> Path:
+    """Write a full copy of the database next to it, e.g. gearsmith-backup-before-0.3.1.db."""
+    target = DB_PATH.parent / f"gearsmith-backup-{label}.db"
+    if target.exists():
+        target = DB_PATH.parent / f"gearsmith-backup-{label}-{datetime.now():%Y%m%d%H%M%S}.db"
+    dest = sqlite3.connect(target)
+    try:
+        c.backup(dest)
+    finally:
+        dest.close()
+    return target
 
 
 def seed_example(c) -> None:
@@ -514,13 +603,19 @@ def seed_example(c) -> None:
         "pick", "DemoPick 0.73", "DemoPick", "Standard",
         {"thickness": "0.73 mm", "material": "Nylon", "quantity": 12},
     )
+    demo_strings = add_gear(
+        "strings", "Demo Strings 10-46", "Demo Strings", "Regular",
+        {"gauge": "10-46", "string_type": "electric", "material": "Nickel wound",
+         "strings_per_set": 6, "sets_per_pack": 3},
+    )
+    c.execute("UPDATE gear SET strings_id=? WHERE id=?", (demo_strings, starling))
 
     # One guitar fresh, one overdue, so both chip states are visible.
     old = (today() - timedelta(days=100)).isoformat()
     recent = (today() - timedelta(days=20)).isoformat()
     c.execute(
-        "INSERT INTO restrings(gear_id,brand,gauge,date,note,created_at) VALUES(?,?,?,?,?,?)",
-        (starling, "Demo Strings", "10-46", old, "Example restring.", stamp),
+        "INSERT INTO restrings(gear_id,brand,gauge,date,note,strings_id,created_at) VALUES(?,?,?,?,?,?,?)",
+        (starling, "Demo Strings", "10-46", old, "Example restring.", demo_strings, stamp),
     )
     c.execute(
         "INSERT INTO restrings(gear_id,brand,gauge,date,note,created_at) VALUES(?,?,?,?,?,?)",
@@ -723,19 +818,20 @@ def me(request: Request):
 # ---------------------------------------------------------------- optional features
 
 # Hideable sections: each gear type, sets, and the maintenance loop.
-FEATURES = ("guitars", "amps", "pedals", "picks", "sets", "maintenance", "songs", "want", "sold")
+FEATURES = ("guitars", "amps", "pedals", "picks", "strings", "sets", "maintenance", "songs", "want", "sold")
 FEATURE_LABELS = {
     "guitars": "Guitars section",
     "amps": "Amps section",
     "pedals": "Pedals section",
     "picks": "Picks section",
+    "strings": "Strings section (string packs)",
     "sets": "Sets (rigs and boards)",
     "maintenance": "Maintenance (restring tracking)",
     "songs": "Songs (rig and tone settings per song)",
     "want": "Want list",
     "sold": "Sold archive",
 }
-FEATURE_FOR_TYPE = {"guitar": "guitars", "amp": "amps", "pedal": "pedals", "pick": "picks"}
+FEATURE_FOR_TYPE = {"guitar": "guitars", "amp": "amps", "pedal": "pedals", "pick": "picks", "strings": "strings"}
 
 
 def feature_on(c, name: str) -> bool:
@@ -785,6 +881,15 @@ def clean_specs(type_: str, specs: dict[str, Any] | None) -> dict[str, Any]:
         if key not in allowed or value is None:
             continue
         label, numeric = allowed[key]
+        choices = SPEC_CHOICES.get(type_, {}).get(key)
+        if choices is not None:
+            value = str(value).strip().lower()
+            if value == "":
+                continue
+            if value not in choices:
+                raise HTTPException(400, f"{label} must be one of: {', '.join(choices)}")
+            out[key] = value
+            continue
         if numeric:
             if value == "":
                 continue
@@ -807,7 +912,7 @@ def strings_info(c, gear_row, on: date | None = None) -> dict[str, Any] | None:
     on = on or today()
     interval = gear_row["restring_interval_days"] or DEFAULT_RESTRING_INTERVAL
     row = c.execute(
-        "SELECT date, brand, gauge FROM restrings WHERE gear_id=? ORDER BY date DESC, id DESC LIMIT 1",
+        "SELECT date, brand, gauge, strings_id FROM restrings WHERE gear_id=? ORDER BY date DESC, id DESC LIMIT 1",
         (gear_row["id"],),
     ).fetchone()
     if not row:
@@ -818,6 +923,7 @@ def strings_info(c, gear_row, on: date | None = None) -> dict[str, Any] | None:
             "last_date": None,
             "last_brand": "",
             "last_gauge": "",
+            "last_strings": None,
             "due_date": None,
             "days_until_due": None,
         }
@@ -837,9 +943,48 @@ def strings_info(c, gear_row, on: date | None = None) -> dict[str, Any] | None:
         "last_date": row["date"],
         "last_brand": row["brand"],
         "last_gauge": row["gauge"],
+        "last_strings": strings_ref(c, row["strings_id"]),
         "due_date": due.isoformat(),
         "days_until_due": (due - on).days,
     }
+
+
+def strings_ref(c, strings_id: int | None) -> dict[str, Any] | None:
+    """A short pointer to a strings item: enough to show and link it."""
+    if strings_id is None:
+        return None
+    row = c.execute("SELECT * FROM gear WHERE id=? AND type='strings'", (strings_id,)).fetchone()
+    if not row:
+        return None
+    specs = json.loads(row["specs"] or "{}")
+    photos = photo_list(c, row["id"])
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "make": row["make"],
+        "model": row["model"],
+        "gauge": specs.get("gauge", ""),
+        "string_type": specs.get("string_type", ""),
+        "cover": photos[0]["url"] if photos else None,
+    }
+
+
+def strings_users(c, strings_id: int) -> list[dict[str, Any]]:
+    """Guitars that use this strings item."""
+    rows = c.execute(
+        "SELECT id, name, lifecycle FROM gear WHERE strings_id=? AND type='guitar' ORDER BY name COLLATE NOCASE",
+        (strings_id,),
+    ).fetchall()
+    return [{"id": r["id"], "name": r["name"], "lifecycle": r["lifecycle"]} for r in rows]
+
+
+def check_strings_id(c, strings_id: int | None) -> int | None:
+    if strings_id is None:
+        return None
+    row = c.execute("SELECT type FROM gear WHERE id=?", (strings_id,)).fetchone()
+    if not row or row["type"] != "strings":
+        raise HTTPException(400, "strings_id must be the id of a strings item")
+    return strings_id
 
 
 def display_user(c, user_id) -> str:
@@ -872,6 +1017,7 @@ def gear_dict(c, row, on: date | None = None) -> dict[str, Any]:
         "id": row["id"],
         "type": row["type"],
         "type_label": GEAR_TYPE_LABELS[row["type"]],
+        "type_singular": GEAR_TYPE_SINGULAR[row["type"]],
         "name": row["name"],
         "make": row["make"],
         "model": row["model"],
@@ -898,6 +1044,9 @@ def gear_dict(c, row, on: date | None = None) -> dict[str, Any]:
         "modeler": bool(specs.get("modeler")),
         "share": share_info(c, "gear", row["id"]),
         "strings": strings_info(c, row, on) if row["lifecycle"] == "owned" else None,
+        "strings_id": row["strings_id"] if row["type"] == "guitar" else None,
+        "strings_used": strings_ref(c, row["strings_id"]) if row["type"] == "guitar" else None,
+        "used_on": strings_users(c, row["id"]) if row["type"] == "strings" else None,
         "photos": photos,
         "cover": photos[0]["url"] if photos else None,
         "sets": gear_sets(c, row["id"]),
@@ -913,7 +1062,7 @@ def get_gear_row(c, gear_id: int):
 
 
 class GearIn(BaseModel):
-    type: Literal["guitar", "amp", "pedal", "pick"]
+    type: Literal["guitar", "amp", "pedal", "pick", "strings"]
     name: str = Field(min_length=1, max_length=80)
     make: str = Field(default="", max_length=80)
     model: str = Field(default="", max_length=80)
@@ -930,6 +1079,7 @@ class GearIn(BaseModel):
     want_price: float | None = Field(default=None, ge=0, le=10_000_000)
     sold_date: str | None = None
     sold_price: float | None = Field(default=None, ge=0, le=10_000_000)
+    strings_id: int | None = Field(default=None, description="Guitars only: the strings item this guitar uses")
 
     @field_validator("purchase_date", "sold_date")
     @classmethod
@@ -954,6 +1104,7 @@ class GearPatch(BaseModel):
     want_price: float | None = Field(default=None, ge=0, le=10_000_000)
     sold_date: str | None = None
     sold_price: float | None = Field(default=None, ge=0, le=10_000_000)
+    strings_id: int | None = Field(default=None, description="Guitars only: the strings item this guitar uses")
 
     @field_validator("purchase_date", "sold_date")
     @classmethod
@@ -964,18 +1115,21 @@ class GearPatch(BaseModel):
 def create_gear(c, body: GearIn, user_id: int | None) -> int:
     if body.type != "guitar" and body.restring_interval_days is not None:
         raise HTTPException(400, "Only guitars have a restring interval")
+    if body.type != "guitar" and body.strings_id is not None:
+        raise HTTPException(400, "Only guitars use a strings item")
+    check_strings_id(c, body.strings_id)
     stamp = now_iso()
     return c.execute(
         """INSERT INTO gear(type,name,make,model,year,serial,specs,status,purchase_date,
            purchase_price,notes,restring_interval_days,favorite,lifecycle,want_price,sold_date,
-           sold_price,created_by,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           sold_price,strings_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             body.type, body.name.strip(), body.make.strip(), body.model.strip(), body.year,
             body.serial.strip(), json.dumps(clean_specs(body.type, body.specs)), body.status,
             body.purchase_date, body.purchase_price, body.notes.strip(), body.restring_interval_days,
             int(bool(body.favorite)), body.lifecycle or "owned", body.want_price, body.sold_date,
-            body.sold_price, user_id, stamp, stamp,
+            body.sold_price, body.strings_id, user_id, stamp, stamp,
         ),
     ).lastrowid
 
@@ -988,6 +1142,13 @@ def patch_gear(c, row, body: GearPatch) -> None:
     data["specs"] = json.dumps(specs)
     if row["type"] != "guitar" and data.get("restring_interval_days") is not None:
         raise HTTPException(400, "Only guitars have a restring interval")
+    if "strings_id" in data:
+        if row["type"] != "guitar":
+            if data["strings_id"] is not None:
+                raise HTTPException(400, "Only guitars use a strings item")
+            data.pop("strings_id")
+        else:
+            check_strings_id(c, data["strings_id"])
     if "favorite" in data:
         # null means "leave it alone", so a full PUT from an older client never clears the star
         favorite = data.pop("favorite")
@@ -1006,7 +1167,9 @@ def patch_gear(c, row, body: GearPatch) -> None:
     c.execute(f"UPDATE gear SET {cols} WHERE id=?", (*data.values(), row["id"]))
 
 
-def list_gear_rows(c, type_: str | None = None, lifecycle: str | None = None) -> list[dict[str, Any]]:
+def list_gear_rows(
+    c, type_: str | None = None, lifecycle: str | None = None, q: str | None = None
+) -> list[dict[str, Any]]:
     where, params = [], []
     if type_:
         if type_ not in GEAR_TYPES:
@@ -1018,6 +1181,14 @@ def list_gear_rows(c, type_: str | None = None, lifecycle: str | None = None) ->
             raise HTTPException(400, "Lifecycle must be owned, want, or sold")
         where.append("lifecycle=?")
         params.append(lifecycle)
+    if q and q.strip():
+        # name, make, model, notes and spec values (gauge, string type, material...)
+        needle = "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        where.append(
+            "(name LIKE ? ESCAPE '\\' OR make LIKE ? ESCAPE '\\' OR model LIKE ? ESCAPE '\\'"
+            " OR notes LIKE ? ESCAPE '\\' OR specs LIKE ? ESCAPE '\\')"
+        )
+        params += [needle] * 5
     sql = "SELECT * FROM gear"
     if where:
         sql += " WHERE " + " AND ".join(where)
@@ -1026,10 +1197,10 @@ def list_gear_rows(c, type_: str | None = None, lifecycle: str | None = None) ->
 
 
 @app.get("/api/gear")
-def list_gear(request: Request, type: str | None = None, lifecycle: str | None = None):
+def list_gear(request: Request, type: str | None = None, lifecycle: str | None = None, q: str | None = None):
     current_user(request)
     with db() as c:
-        return list_gear_rows(c, type, lifecycle)
+        return list_gear_rows(c, type, lifecycle, q)
 
 
 @app.get("/api/gear/{gear_id}")
@@ -1054,7 +1225,9 @@ def replace_gear(gear_id: int, body: GearIn, request: Request):
         row = get_gear_row(c, gear_id)
         if body.type != row["type"]:
             raise HTTPException(400, "Gear type can't change; delete and re-add instead")
-        patch = GearPatch(**body.model_dump(exclude={"type"}))
+        # A PUT that doesn't mention strings_id (an older client) leaves the guitar's strings alone.
+        skip = {"type"} if "strings_id" in body.model_fields_set else {"type", "strings_id"}
+        patch = GearPatch(**body.model_dump(exclude=skip))
         patch_gear(c, row, patch)
         return gear_dict(c, get_gear_row(c, gear_id))
 
@@ -1067,15 +1240,23 @@ def update_gear(gear_id: int, body: GearPatch, request: Request):
         return gear_dict(c, get_gear_row(c, gear_id))
 
 
+def remove_gear(c, gear_id: int) -> dict[str, Any]:
+    row = get_gear_row(c, gear_id)
+    for photo in photo_list(c, gear_id):
+        unlink_photo(photo["url"].rsplit("/", 1)[-1])
+    if row["type"] == "strings":
+        # Guitars and restring entries keep their text; they just stop pointing here.
+        c.execute("UPDATE gear SET strings_id=NULL WHERE strings_id=?", (gear_id,))
+        c.execute("UPDATE restrings SET strings_id=NULL WHERE strings_id=?", (gear_id,))
+    c.execute("DELETE FROM gear WHERE id=?", (row["id"],))
+    return {"ok": True}
+
+
 @app.delete("/api/gear/{gear_id}")
 def delete_gear(gear_id: int, request: Request):
     current_user(request)
     with db() as c:
-        row = get_gear_row(c, gear_id)
-        for photo in photo_list(c, gear_id):
-            unlink_photo(photo["url"].rsplit("/", 1)[-1])
-        c.execute("DELETE FROM gear WHERE id=?", (row["id"],))
-        return {"ok": True}
+        return remove_gear(c, gear_id)
 
 
 # ---------------------------------------------------------------- restring log
@@ -1086,6 +1267,11 @@ class RestringIn(BaseModel):
     gauge: str = Field(default="", max_length=40)
     date: str | None = None
     note: str = Field(default="", max_length=1000)
+    strings_id: int | None = Field(
+        default=None,
+        description="Optional strings item that went on. Blank brand and gauge are filled from it, "
+        "and the guitar's strings switch to it.",
+    )
 
     @field_validator("date")
     @classmethod
@@ -1101,6 +1287,8 @@ def restring_dict(c, row) -> dict[str, Any]:
         "gauge": row["gauge"],
         "date": row["date"],
         "note": row["note"],
+        "strings_id": row["strings_id"],
+        "strings": strings_ref(c, row["strings_id"]),
         "logged_by": display_user(c, row["user_id"]) or "System",
         "via": row["via"],
     }
@@ -1115,17 +1303,25 @@ def log_restring(c, gear_id: int, body: RestringIn, user_id: int | None, via: st
         raise HTTPException(400, "Dates must be YYYY-MM-DD")
     if when > today():
         raise HTTPException(400, "A restring can't be logged in the future")
+    brand, gauge = body.brand.strip(), body.gauge.strip()
+    strings = strings_ref(c, check_strings_id(c, body.strings_id))
+    if strings:
+        # Picked from your strings: fill in whatever was left blank.
+        brand = brand or strings["make"] or strings["name"]
+        gauge = gauge or strings["gauge"]
     rid = c.execute(
-        """INSERT INTO restrings(gear_id,brand,gauge,date,note,user_id,via,created_at)
-        VALUES(?,?,?,?,?,?,?,?)""",
-        (gear_id, body.brand.strip(), body.gauge.strip(), when.isoformat(), body.note.strip(),
-         user_id, via, now_iso()),
+        """INSERT INTO restrings(gear_id,brand,gauge,date,note,user_id,via,strings_id,created_at)
+        VALUES(?,?,?,?,?,?,?,?,?)""",
+        (gear_id, brand, gauge, when.isoformat(), body.note.strip(),
+         user_id, via, body.strings_id, now_iso()),
     ).lastrowid
     # A fresh set of strings usually means the current gauge changed too.
-    if body.gauge.strip():
+    if gauge:
         specs = json.loads(row["specs"] or "{}")
-        specs["string_gauge"] = body.gauge.strip()
+        specs["string_gauge"] = gauge
         c.execute("UPDATE gear SET specs=? WHERE id=?", (json.dumps(specs), gear_id))
+    if body.strings_id is not None:
+        c.execute("UPDATE gear SET strings_id=? WHERE id=?", (body.strings_id, gear_id))
     c.execute("UPDATE gear SET updated_at=? WHERE id=?", (now_iso(), gear_id))
     return rid
 
@@ -1550,7 +1746,7 @@ def share_facts(row) -> list[tuple[str, Any]]:
     """What a shared page shows about an item: make, model, year and specs. Never the serial
     number, prices, or who added it."""
     specs = json.loads(row["specs"] or "{}")
-    facts = [("Brand" if row["type"] == "pick" else "Make", row["make"]), ("Model", row["model"]), ("Year", row["year"])]
+    facts = [("Brand" if row["type"] in BRAND_TYPES else "Make", row["make"]), ("Model", row["model"]), ("Year", row["year"])]
     facts += [(label, specs.get(key)) for key, label, _ in SPEC_FIELDS[row["type"]]]
     return [(k, v) for k, v in facts if v not in (None, "")]
 
@@ -1587,7 +1783,7 @@ def gear_share_html(c, row, token: str) -> str:
     facts = share_facts(row)
     fact_html = "".join(f'<div class="fact"><span>{h(k)}</span>{h(v)}</div>' for k, v in facts)
     parts = [
-        f'<p class="share-type">{h(GEAR_TYPE_LABELS[row["type"]][:-1])}{" · sold" if row["lifecycle"] == "sold" else ""}</p>',
+        f'<p class="share-type">{h(GEAR_TYPE_SINGULAR[row["type"]])}{" · sold" if row["lifecycle"] == "sold" else ""}</p>',
         f'<h1>{h(row["name"])}</h1>',
         f'<div class="share-photos">{photo_html}</div>' if photo_html else "",
         f'<div class="facts">{fact_html}</div>' if fact_html else "",
@@ -1612,7 +1808,7 @@ def set_share_html(c, set_row, token: str) -> str:
             f"""<section class="share-item">
   <div class="share-thumb">{f'<img src="{share_photo_url(token, cover["filename"])}" alt="" />' if cover else ""}</div>
   <div class="share-item-body">
-    <p class="share-type">{h(GEAR_TYPE_LABELS[g["type"]][:-1])}</p>
+    <p class="share-type">{h(GEAR_TYPE_SINGULAR[g["type"]])}</p>
     <h2>{h(g["name"])}</h2>
     {'<div class="facts">' + "".join(f'<div class="fact"><span>{h(k)}</span>{h(v)}</div>' for k, v in facts) + "</div>" if facts else ""}
     {f'<p class="notes">{h(g["notes"])}</p>' if g["notes"] else ""}
@@ -2695,6 +2891,7 @@ class SettingsIn(BaseModel):
     feature_amps: bool | None = None
     feature_pedals: bool | None = None
     feature_picks: bool | None = None
+    feature_strings: bool | None = None
     feature_sets: bool | None = None
     feature_maintenance: bool | None = None
     feature_songs: bool | None = None
@@ -2856,11 +3053,12 @@ def revoke_token(item_id: int, request: Request):
 
 
 @app.get("/api/v1/gear", tags=["v1"],
-         summary="List gear, optionally filtered by type and lifecycle (owned, want, sold)")
-def v1_list_gear(request: Request, type: str | None = None, lifecycle: str | None = None):
+         summary="List gear, optionally filtered by type (guitar, amp, pedal, pick, strings), "
+                 "lifecycle (owned, want, sold) and a search term q")
+def v1_list_gear(request: Request, type: str | None = None, lifecycle: str | None = None, q: str | None = None):
     token_auth(request)
     with db() as c:
-        return list_gear_rows(c, type, lifecycle)
+        return list_gear_rows(c, type, lifecycle, q)
 
 
 @app.post("/api/v1/gear", tags=["v1"], status_code=201, summary="Add a piece of gear")
@@ -2890,11 +3088,7 @@ def v1_patch_gear(gear_id: int, body: GearPatch, request: Request):
 def v1_delete_gear(gear_id: int, request: Request):
     token_auth(request)
     with db() as c:
-        row = get_gear_row(c, gear_id)
-        for photo in photo_list(c, gear_id):
-            unlink_photo(photo["url"].rsplit("/", 1)[-1])
-        c.execute("DELETE FROM gear WHERE id=?", (row["id"],))
-        return {"ok": True}
+        return remove_gear(c, gear_id)
 
 
 @app.get("/api/v1/gear/{gear_id}/restrings", tags=["v1"], summary="List a guitar's restring history")

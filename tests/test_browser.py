@@ -704,3 +704,43 @@ def test_set_chips_link_to_set_pages(app_url, width, height):
         expect(page.locator(".fact a", has_text="Compact Setup")).to_have_count(0)
 
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_preset_cards_show_rig_tag_and_chain(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        gear = {g["name"]: g for g in req.get(app_url + "/api/gear").json()}
+        assert req.post(app_url + "/api/presets", data={
+            "name": "Dexter and The Moonrocks Extended Long Title (Ampero Mini)", "artist": "Dexter and The Moonrocks",
+            "amp_id": gear["Club 20"]["id"],
+            "patches": [{"gear_name": "Ampero Mini", "patch_name": "Dexter", "blocks": [
+                {"block_type": "Drive", "model": "Big Pie"}, {"block_type": "Amp", "model": "Marshell 800"},
+                {"block_type": "Delay", "model": "Recaller"}, {"block_type": "Reverb", "model": "Hall"}]}],
+        }).ok
+        assert req.post(app_url + "/api/presets", data={
+            "name": "No Rig Suffix", "artist": "Dexter and The Moonrocks",
+            "rig": [{"gear_id": gear["Demo Drive"]["id"]}],
+        }).ok
+
+        page.goto(app_url + "/#/songs/artists")
+        card = page.locator(".preset-card", has_text="Ampero Mini")
+        expect(card.locator(".gc-name")).to_have_text("Dexter and The Moonrocks Extended Long Title")
+        expect(card.locator(".rig-tag")).to_have_text("Ampero Mini")
+        expect(card.locator(".chain-line")).to_have_text("Big Pie › Marshell 800 › Recaller › Hall › Club 20")
+        # the title wraps to at most two lines instead of cutting off on one
+        lines = card.locator(".gc-name").evaluate(
+            "el => Math.round(el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight))")
+        assert 1 <= lines <= 2
+        plain = page.locator(".preset-card", has_text="No Rig Suffix")
+        expect(plain.locator(".rig-tag")).to_have_count(0)
+        expect(plain.locator(".chain-line")).to_have_text("Demo Drive")
+        assert_no_overflow(page, "artists view preset cards")
+
+        page.goto(app_url + "/#/presets")
+        expect(page.locator(".preset-card .rig-tag", has_text="Ampero Mini")).to_be_visible()
+        assert_no_overflow(page, "presets list")
+        browser.close()

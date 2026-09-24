@@ -1,0 +1,16 @@
+services:
+  gearsmith:
+    image: ghcr.io/dhrandy/gearsmith:latest
+    container_name: gearsmith
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+    environment:
+      # Your timezone, so "due today" and quiet hours match your clock.
+      - TZ=${TZ:-UTC}
+      # Set to true once Gearsmith is served over HTTPS (reverse proxy).
+      - GEARSMITH_COOKIE_SECURE=${GEARSMITH_COOKIE_SECURE:-false}
+      # IP of your reverse proxy, so login rate limits see real client addresses.
+      - FORWARDED_ALLOW_IPS=${FORWARDED_ALLOW_IPS:-127.0.0.1}
+    ports:
+      - 8743:8000

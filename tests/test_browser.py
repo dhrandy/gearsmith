@@ -112,3 +112,56 @@ def test_mobile_add_restring_from_due(app_url):
         page.get_by_role("link", name="Strings", exact=True).click()
         expect(page.get_by_role("heading", name="Strings", exact=True)).to_be_visible()
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_token_create_shows_value_once_and_revoke(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        ctx = browser.new_context(viewport={"width": width, "height": height})
+        ctx.grant_permissions(["clipboard-read", "clipboard-write"], origin=app_url)
+        page = ctx.new_page()
+        page.on("dialog", lambda d: d.accept())
+        sign_in(page, app_url)
+        page.goto(app_url + "/#/settings")
+        expect(page.get_by_role("heading", name="API tokens")).to_be_visible()
+
+        page.locator("#tk-name").fill("my phone")
+        page.get_by_role("button", name="Create token").click()
+        value = page.locator("#token-value")
+        expect(value).to_be_visible()
+        expect(value).to_have_text(re.compile(r"^gs_\S{20,}$"))
+        token = value.inner_text()
+        # the value must survive the list re-render, not flash and vanish
+        page.wait_for_timeout(1500)
+        expect(value).to_be_visible()
+        expect(value).to_have_text(token)
+        # the list shows only the prefix, never the full value
+        row = page.locator("#token-list .list-row", has_text="my phone")
+        expect(row).to_contain_text(token[:8] + "...")
+        assert token not in page.locator("#token-list").inner_text()
+        # the token actually works
+        assert httpx.get(app_url + "/api/v1/gear", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+        # copy affordance
+        page.get_by_role("button", name="Copy token").click()
+        expect(page.get_by_role("button", name="Copied")).to_be_visible()
+        assert page.evaluate("navigator.clipboard.readText()") == token
+
+        # revoking a different token keeps the new one on screen
+        page.locator("#tk-name").fill("old laptop")
+        page.get_by_role("button", name="Create token").click()
+        expect(page.locator("#token-value")).not_to_have_text(token)
+        token2 = page.locator("#token-value").inner_text()
+        page.locator("#token-list .list-row", has_text="my phone").get_by_role("button", name="Revoke").click()
+        expect(page.locator("#token-list .list-row", has_text="my phone")).to_have_count(0)
+        expect(page.locator("#token-value")).to_have_text(token2)
+        assert httpx.get(app_url + "/api/v1/gear", headers={"Authorization": f"Bearer {token}"}).status_code == 401
+
+        # Done hides it, and it is never shown again
+        page.get_by_role("button", name="Done").click()
+        expect(page.locator("#token-value")).to_have_count(0)
+        page.reload()
+        expect(page.get_by_role("heading", name="API tokens")).to_be_visible()
+        expect(page.locator("#token-value")).to_have_count(0)
+        assert token2 not in page.content()
+        browser.close()

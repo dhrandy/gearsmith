@@ -17,7 +17,8 @@
     <link rel="stylesheet" href="/static/style.css" />
   </head>
   <body>
-    <header class="top" id="top" hidden>
+    <div id="top" hidden>
+    <header class="top">
       <div class="wrap topbar">
         <a class="logo" href="#/"><img src="/static/icon.svg" alt="" width="34" height="34" /><span id="app-name">Gearsmith</span></a>
         <span class="spacer"></span>
@@ -33,6 +34,13 @@
         <a class="tab" href="#/settings" data-tab="settings">Settings</a>
       </nav>
     </header>
+    <div class="wrap searchbar">
+      <div class="gsearch">
+        <input type="search" id="global-search" placeholder="Search gear, songs, presets, sets..." autocomplete="off" aria-label="Search everything" />
+        <div class="gsearch-drop" id="gsearch-drop" hidden></div>
+      </div>
+    </div>
+    </div>
     <main class="wrap" id="view" aria-live="polite"></main>
     <div class="modal" id="modal" hidden><div class="sheet" role="dialog" aria-modal="true" id="sheet"></div></div>
     <div class="toast" id="toast" role="status" hidden></div>

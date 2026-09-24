@@ -424,3 +424,286 @@ def test_favorite_column_added_to_existing_database(tmp_path):
     with main.db() as c:
         row = c.execute("SELECT name, favorite FROM gear").fetchone()
     assert (row["name"], row["favorite"]) == ("Old Amp", 0)
+
+
+def test_lifecycle_want_and_sold(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        assert all(g["lifecycle"] == "owned" for g in by_name.values())
+        token = c.post("/api/tokens", json={"name": "life"}).json()["token"]
+        h = {"Authorization": f"Bearer {token}"}
+
+        want = c.post("/api/v1/gear", headers=h, json={
+            "type": "guitar", "name": "Wish Guitar", "lifecycle": "want", "want_price": 1200,
+        }).json()
+        assert (want["lifecycle"], want["want_price"], want["strings"]) == ("want", 1200, None)
+
+        starling = by_name["Starling"]["id"]
+        assert any(i["gear_id"] == starling for i in c.get("/api/due?days=14").json())
+        r = c.patch(f"/api/v1/gear/{starling}", headers=h, json={
+            "lifecycle": "sold", "sold_date": "2026-01-15", "sold_price": 450.5,
+        })
+        assert r.status_code == 200
+        assert (r.json()["lifecycle"], r.json()["sold_date"], r.json()["sold_price"]) == ("sold", "2026-01-15", 450.5)
+        # sold gear leaves the due list and notifications but stays in the database
+        assert all(i["gear_id"] != starling for i in c.get("/api/due?days=14").json())
+        assert all(i["gear_id"] != starling for i in c.get("/api/v1/due?days=14", headers=h).json())
+        assert [g["name"] for g in c.get("/api/gear?lifecycle=sold").json()] == ["Starling"]
+        assert [g["name"] for g in c.get("/api/v1/gear?lifecycle=want", headers=h).json()] == ["Wish Guitar"]
+        assert "Starling" not in [g["name"] for g in c.get("/api/gear?lifecycle=owned").json()]
+        assert c.get("/api/gear?lifecycle=lost").status_code == 400
+        assert c.patch(f"/api/gear/{starling}", json={"lifecycle": "stolen"}).status_code == 422
+        assert c.patch(f"/api/gear/{starling}", json={"sold_date": "15/01/2026"}).status_code == 422
+        # null leaves it alone; location status is separate and untouched
+        assert c.patch(f"/api/gear/{starling}", json={"lifecycle": None}).json()["lifecycle"] == "sold"
+        c.patch(f"/api/gear/{starling}", json={"status": "lent"})
+        assert c.get(f"/api/gear/{starling}").json()["status"] == "lent"
+        assert c.get(f"/api/gear/{starling}").json()["lifecycle"] == "sold"
+        # bought the wish guitar
+        assert c.patch(f"/api/gear/{want['id']}", json={"lifecycle": "owned"}).json()["lifecycle"] == "owned"
+
+
+def test_old_database_gets_lifecycle_and_new_tables(tmp_path):
+    import sqlite3
+
+    main.DB_PATH = tmp_path / "old.db"
+    main.PHOTOS_DIR = tmp_path / "photos"
+    main.PHOTOS_DIR.mkdir()
+    old = sqlite3.connect(main.DB_PATH)
+    old.execute("""CREATE TABLE gear (id INTEGER PRIMARY KEY, type TEXT NOT NULL, name TEXT NOT NULL,
+        make TEXT NOT NULL DEFAULT '', model TEXT NOT NULL DEFAULT '', year INTEGER,
+        serial TEXT NOT NULL DEFAULT '', specs TEXT NOT NULL DEFAULT '{}', status TEXT NOT NULL DEFAULT '',
+        purchase_date TEXT, purchase_price REAL, notes TEXT NOT NULL DEFAULT '',
+        restring_interval_days INTEGER, favorite INTEGER NOT NULL DEFAULT 0, created_by INTEGER,
+        created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""")
+    old.execute("""INSERT INTO gear(type,name,status,favorite,specs,created_at,updated_at)
+        VALUES('pedal','Old Pedal','lent',1,'{"voltage": "9V"}','x','x')""")
+    old.commit()
+    old.close()
+    main.init_db()
+    main.init_db()
+    with main.db() as c:
+        row = c.execute("SELECT * FROM gear").fetchone()
+        tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert (row["name"], row["status"], row["favorite"], row["lifecycle"]) == ("Old Pedal", "lent", 1, "owned")
+    assert row["sold_price"] is None and row["specs"] == '{"voltage": "9V"}'
+    assert {"songs", "song_gear_settings", "song_device_patches", "song_effect_blocks", "song_photos", "shares"} <= tables
+
+
+def test_controls_and_modeler_flag(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        drive = by_name["Demo Drive"]["id"]
+        token = c.post("/api/tokens", json={"name": "ctl"}).json()["token"]
+        h = {"Authorization": f"Bearer {token}"}
+        r = c.patch(f"/api/v1/gear/{drive}", headers=h, json={"specs": {
+            "controls": [{"name": "Gain"}, "Tone", {"name": "Level", "kind": "knob"},
+                         {"name": "Voice", "kind": "switch"}, {"name": "gain"}, {"name": " "}],
+            "modeler": True,
+        }})
+        assert r.status_code == 200
+        g = r.json()
+        assert [x["name"] for x in g["controls"]] == ["Gain", "Tone", "Level", "Voice"]
+        assert g["controls"][3]["kind"] == "switch" and g["modeler"] is True
+        # other spec edits keep the controls; the controls list replaces as a whole
+        g = c.patch(f"/api/gear/{drive}", json={"specs": {"voltage": "18V"}}).json()
+        assert len(g["controls"]) == 4 and g["specs"]["voltage"] == "18V"
+        assert c.patch(f"/api/gear/{drive}", json={"specs": {"controls": [{"name": "X", "kind": "fader"}]}}).status_code == 400
+        # picks have no controls, only pedals can be modelers
+        pick = by_name["DemoPick 0.73"]["id"]
+        assert c.patch(f"/api/gear/{pick}", json={"specs": {"controls": ["Gain"]}}).json()["controls"] == []
+        amp = by_name["Club 20"]["id"]
+        assert c.patch(f"/api/gear/{amp}", json={"specs": {"modeler": True}}).json()["modeler"] is False
+
+
+def song_payload(by_name):
+    return {
+        "title": "Test Song", "artist": "Test Band", "tuning": "Drop D", "capo": 2, "key": "D", "bpm": 120,
+        "guitar_id": by_name["Starling"]["id"], "amp_id": by_name["Club 20"]["id"], "set_id": 1,
+        "notes": "Bridge pickup",
+        "rig": [
+            {"gear_id": by_name["Demo Drive"]["id"], "engaged": "toggle",
+             "knobs": [{"name": "Gain", "value": "2:00"}, {"name": "Level", "value": 7}]},
+            {"gear_id": by_name["Club 20"]["id"], "knobs": [{"name": "Master", "value": "noon"}]},
+        ],
+        "patches": [{
+            "gear_id": by_name["Demo Delay"]["id"], "patch_ref": "12B", "patch_name": "Lead",
+            "scenes": ["verse", "chorus", " "], "midi": {"channel": 1, "pc": 23},
+            "blocks": [{"block_type": "Delay", "model": "Tape", "enabled": False,
+                        "params": [{"name": "Mix", "value": "30%"}], "scene_overrides": {"solo": {"Mix": "40%"}}}],
+        }],
+    }
+
+
+def test_song_crud_with_rig_and_patches(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        token = c.post("/api/tokens", json={"name": "songs"}).json()["token"]
+        h = {"Authorization": f"Bearer {token}"}
+        assert c.get("/api/v1/songs").status_code == 401
+
+        r = c.post("/api/v1/songs", headers=h, json=song_payload(by_name))
+        assert r.status_code == 201, r.text
+        s = r.json()
+        assert (s["guitar_name"], s["amp_name"], s["set_name"], s["key"]) == ("Starling", "Club 20", "Practice board", "D")
+        assert [x["gear_name"] for x in s["rig"]] == ["Demo Drive", "Club 20"]
+        assert s["rig"][0]["knobs"] == [{"name": "Gain", "value": "2:00"}, {"name": "Level", "value": "7"}]
+        assert s["rig"][0]["engaged"] == "toggle"
+        p = s["patches"][0]
+        assert (p["patch_ref"], p["scenes"], p["midi"]) == ("12B", ["verse", "chorus"], {"channel": 1, "pc": 23})
+        assert p["blocks"][0]["enabled"] is False and p["blocks"][0]["scene_overrides"] == {"solo": {"Mix": "40%"}}
+        sid = s["id"]
+
+        # list, search, and filter by gear used anywhere in the song
+        assert [x["title"] for x in c.get("/api/songs").json()] == ["Test Song"]
+        assert c.get("/api/v1/songs?q=band", headers=h).json()[0]["id"] == sid
+        assert c.get(f"/api/songs?gear_id={by_name['Demo Delay']['id']}").json()[0]["id"] == sid
+        assert c.get(f"/api/songs?gear_id={by_name['Heron']['id']}").json() == []
+
+        # PATCH without rig keeps it; with rig replaces it
+        r = c.patch(f"/api/v1/songs/{sid}", headers=h, json={"bpm": 90, "capo": None})
+        assert (r.json()["bpm"], r.json()["capo"], len(r.json()["rig"])) == (90, None, 2)
+        r = c.patch(f"/api/songs/{sid}", json={"rig": [{"gear_name": "Borrowed Fuzz", "knobs": [{"name": "Fuzz", "value": "max"}]}]})
+        assert [x["gear_name"] for x in r.json()["rig"]] == ["Borrowed Fuzz"] and r.json()["rig"][0]["gear_id"] is None
+
+        # nested rig routes
+        r = c.post(f"/api/v1/songs/{sid}/rig", headers=h, json={"gear_id": by_name["Demo Drive"]["id"]})
+        assert r.status_code == 201 and r.json()["position"] == 1
+        rid = r.json()["id"]
+        r = c.patch(f"/api/v1/songs/{sid}/rig/{rid}", headers=h, json={"engaged": "off", "knobs": [{"name": "Gain", "value": "9:00"}]})
+        assert (r.json()["engaged"], r.json()["knobs"][0]["value"]) == ("off", "9:00")
+        assert c.patch(f"/api/v1/songs/{sid}/rig/{rid}", headers=h, json={"engaged": "half"}).status_code == 422
+        assert c.delete(f"/api/v1/songs/{sid}/rig/{rid}", headers=h).status_code == 200
+        assert c.delete(f"/api/v1/songs/{sid}/rig/{rid}", headers=h).status_code == 404
+
+        # nested patch routes
+        pid = c.get(f"/api/songs/{sid}").json()["patches"][0]["id"]
+        r = c.patch(f"/api/v1/songs/{sid}/patches/{pid}", headers=h, json={"patch_ref": "Bank 3 / Patch 2", "blocks": []})
+        assert (r.json()["patch_ref"], r.json()["blocks"], r.json()["patch_name"]) == ("Bank 3 / Patch 2", [], "Lead")
+        r = c.post(f"/api/songs/{sid}/patches", json={"gear_id": by_name["Demo Drive"]["id"], "patch_ref": "A1"})
+        assert r.status_code == 201
+        assert c.delete(f"/api/songs/{sid}/patches/{r.json()['id']}").status_code == 200
+
+        # validation
+        assert c.post("/api/songs", json={"title": ""}).status_code == 422
+        assert c.post("/api/songs", json={"title": "X", "guitar_id": by_name["Club 20"]["id"]}).status_code == 400
+        assert c.post("/api/songs", json={"title": "X", "rig": [{"knobs": []}]}).status_code == 400
+        assert c.post("/api/songs", json={"title": "X", "guitar_id": 9999}).status_code == 400
+        assert c.get("/api/songs/9999").status_code == 404
+        assert "/api/v1/songs/{song_id}/rig/{setting_id}" in c.get("/api/v1/openapi.json").json()["paths"]
+
+
+def test_song_keeps_gear_names_after_gear_is_deleted(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        sid = c.post("/api/songs", json=song_payload(by_name)).json()["id"]
+        c.delete(f"/api/gear/{by_name['Club 20']['id']}")
+        c.delete(f"/api/gear/{by_name['Demo Delay']['id']}")
+        c.delete("/api/sets/1")
+        s = c.get(f"/api/songs/{sid}").json()
+        assert (s["amp_id"], s["amp_name"], s["set_id"], s["set_name"]) == (None, "Club 20", None, "Practice board")
+        assert [(x["gear_id"], x["gear_name"]) for x in s["rig"]][1] == (None, "Club 20")
+        assert (s["patches"][0]["gear_id"], s["patches"][0]["gear_name"]) == (None, "Demo Delay")
+
+
+def test_song_photos_and_delete(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        sid = c.post("/api/songs", json={"title": "Photo Song"}).json()["id"]
+        token = c.post("/api/tokens", json={"name": "sp"}).json()["token"]
+        h = {"Authorization": f"Bearer {token}"}
+        a = c.post(f"/api/songs/{sid}/photos", files={"photo": ("a.png", PNG, "image/png")}).json()
+        b = c.post(f"/api/v1/songs/{sid}/photos", headers=h, files={"photo": ("b.png", PNG, "image/png")}).json()
+        assert c.post(f"/api/songs/{sid}/photos", files={"photo": ("x.txt", b"hello", "text/plain")}).status_code == 400
+        assert c.get(f"/api/songs/{sid}").json()["cover"] == a["url"]
+        assert c.post(f"/api/v1/song-photos/{b['id']}/cover", headers=h).status_code == 200
+        assert c.get("/api/songs").json()[0]["cover"] == b["url"]
+        assert c.delete(f"/api/song-photos/{a['id']}").status_code == 200
+        assert len(list(main.PHOTOS_DIR.iterdir())) == 1
+        assert c.delete(f"/api/v1/songs/{sid}", headers=h).status_code == 200
+        assert list(main.PHOTOS_DIR.iterdir()) == []
+        assert c.get(f"/api/songs/{sid}").status_code == 404
+
+
+def test_share_links_for_gear_and_sets(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        starling = by_name["Starling"]["id"]
+        c.patch(f"/api/gear/{starling}", json={"serial": "SECRET-SERIAL", "purchase_price": 999, "notes": "Plays great <b>"})
+        photo = c.post(f"/api/gear/{starling}/photos", files={"photo": ("a.png", PNG, "image/png")}).json()
+        other = c.post(f"/api/gear/{by_name['Heron']['id']}/photos", files={"photo": ("b.png", PNG, "image/png")}).json()
+        token = c.post("/api/tokens", json={"name": "share"}).json()["token"]
+        h = {"Authorization": f"Bearer {token}"}
+
+        assert c.get(f"/api/gear/{starling}").json()["share"] is None
+        share = c.post(f"/api/v1/gear/{starling}/share", headers=h, json={"expires_in_days": 30}).json()["share"]
+        assert len(share["token"]) >= 32 and share["expires_at"] and share["url"] == "/share/" + share["token"]
+        assert c.get(f"/api/gear/{starling}").json()["share"]["token"] == share["token"]
+        # asking again returns the same link
+        assert c.post(f"/api/gear/{starling}/share").json()["share"]["token"] == share["token"]
+
+        # the public page works signed out, is read-only, and hides serial/price
+        anon = TestClient(main.app)
+        page = anon.get(share["url"])
+        assert page.status_code == 200
+        assert "noindex" in page.headers["x-robots-tag"] and "nofollow" in page.headers["x-robots-tag"]
+        assert '<meta name="robots" content="noindex' in page.text
+        assert "Starling" in page.text and "3-tone sunburst" in page.text and "Plays great &lt;b&gt;" in page.text
+        assert "SECRET-SERIAL" not in page.text and "999" not in page.text
+        assert "<form" not in page.text and 'href="/#' not in page.text and "app.js" not in page.text
+        name = photo["url"].rsplit("/", 1)[-1]
+        assert anon.get(f"{share['url']}/photos/{name}").status_code == 200
+        assert anon.get(f"{share['url']}/photos/{other['url'].rsplit('/', 1)[-1]}").status_code == 404
+        assert anon.get(photo["url"]).status_code == 401
+        assert anon.get("/share/not-a-real-token-at-all-000000").status_code == 404
+        assert "Disallow: /" in anon.get("/robots.txt").text
+
+        # regenerate kills the old URL, delete kills the link
+        new = c.post(f"/api/gear/{starling}/share", json={"regenerate": True}).json()["share"]
+        assert new["token"] != share["token"] and new["expires_at"] is None
+        assert anon.get(share["url"]).status_code == 404
+        assert anon.get(new["url"]).status_code == 200
+        assert c.delete(f"/api/v1/gear/{starling}/share", headers=h).status_code == 200
+        assert anon.get(new["url"]).status_code == 404
+        assert c.get(f"/api/v1/gear/{starling}", headers=h).json()["share"] is None
+
+        # expired links stop working
+        s2 = c.post(f"/api/gear/{starling}/share", json={"expires_in_days": 1}).json()["share"]
+        with main.db() as db:
+            db.execute("UPDATE shares SET expires_at=? WHERE token=?", ("2000-01-01T00:00:00+00:00", s2["token"]))
+        assert anon.get(s2["url"]).status_code == 404
+        assert c.get(f"/api/gear/{starling}").json()["share"]["expired"] is True
+        assert c.post(f"/api/gear/{starling}/share", json={"expires_in_days": 0}).status_code == 422
+
+        # sets: one page listing the set's gear, with member photos only
+        sset = c.post("/api/v1/sets/1/share", headers=h, json={}).json()["share"]
+        page = anon.get(sset["url"])
+        assert page.status_code == 200 and "Practice board" in page.text and "Demo Drive" in page.text
+        assert "SECRET-SERIAL" not in page.text
+        assert anon.get(f"{sset['url']}/photos/{name}").status_code == 200
+        assert anon.get(f"{sset['url']}/photos/{other['url'].rsplit('/', 1)[-1]}").status_code == 404
+        assert c.get("/api/sets/1").json()["share"]["token"] == sset["token"]
+        c.delete("/api/sets/1")
+        assert anon.get(sset["url"]).status_code == 404
+        assert c.post("/api/gear/9999/share").status_code == 404
+
+
+def test_song_and_lifecycle_feature_toggles(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        s = c.get("/api/settings").json()
+        assert s["feature_songs"] and s["feature_want"] and s["feature_sold"]
+        s = c.put("/api/settings", json={"feature_songs": False, "feature_sold": False}).json()
+        assert (s["feature_songs"], s["feature_want"], s["feature_sold"]) == (False, True, False)

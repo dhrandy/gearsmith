@@ -626,3 +626,81 @@ def test_strings_type_and_guitar_picks_strings(app_url, width, height):
         # no sideways scrolling on a phone
         assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_set_chips_link_to_set_pages(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        amp = req.post(app_url + "/api/gear", data={"type": "amp", "name": "Chip Amp"}).json()
+        pedal = req.post(app_url + "/api/gear", data={"type": "pedal", "name": "Chip Drive"}).json()
+        compact = req.post(app_url + "/api/sets", data={
+            "name": "Compact Setup", "notes": "Small bag rig", "item_ids": [amp["id"], pedal["id"]],
+        }).json()
+        long_set = req.post(app_url + "/api/sets", data={
+            "name": "Long " + LONG_WORD, "notes": "Notes " + LONG_WORD, "item_ids": [amp["id"]],
+        }).json()
+        song = req.post(app_url + "/api/songs", data={"title": "Chip Song", "set_id": compact["id"]}).json()
+
+        # gear page: every set chip is a link to its set page
+        page.goto(app_url + f"/#/gear/{amp['id']}")
+        chips = page.locator("#gd-sets a.set-chip")
+        expect(chips).to_have_count(2)
+        assert_no_overflow(page, "gear page with set chips")
+        chips.filter(has_text="Compact Setup").click()
+        expect(page).to_have_url(re.compile(f"#/sets/{compact['id']}$"))
+        expect(page.get_by_role("heading", name="Compact Setup", exact=True)).to_be_visible()
+        expect(page.get_by_text("Small bag rig")).to_be_visible()
+        expect(page.locator(".tab.active")).to_have_attribute("data-tab", "sets")
+        expect(page.locator(".set-member")).to_have_count(2)
+        assert_no_overflow(page, "set page")
+
+        # set page members lead back to gear
+        page.locator(".set-member", has_text="Chip Drive").click()
+        expect(page.get_by_role("heading", name="Chip Drive", exact=True)).to_be_visible()
+
+        # the "in ..." line under the gear name links too
+        page.goto(app_url + f"/#/gear/{amp['id']}")
+        page.locator("#view p.muted a", has_text="Compact Setup").click()
+        expect(page).to_have_url(re.compile(f"#/sets/{compact['id']}$"))
+
+        # song page: the Set fact links to the set
+        page.goto(app_url + f"/#/songs/{song['id']}")
+        page.locator(".fact a", has_text="Compact Setup").click()
+        expect(page.get_by_role("heading", name="Compact Setup", exact=True)).to_be_visible()
+
+        # sets list: the set name opens its page
+        page.goto(app_url + "/#/sets")
+        page.locator(".set-card a.set-name", has_text="Compact Setup").click()
+        expect(page).to_have_url(re.compile(f"#/sets/{compact['id']}$"))
+
+        # editing from the set page stays on the set page
+        page.get_by_role("button", name="Edit").click()
+        page.locator("#sf-name").fill("Compact Setup 2")
+        page.get_by_role("button", name="Save changes").click()
+        expect(page.get_by_role("heading", name="Compact Setup 2", exact=True)).to_be_visible()
+        expect(page).to_have_url(re.compile(f"#/sets/{compact['id']}$"))
+
+        # long names stay inside the page on the set page
+        page.goto(app_url + f"/#/sets/{long_set['id']}")
+        page.locator("#view h1").first.wait_for()
+        assert_no_overflow(page, "set page with long name")
+
+        # deleting from the set page goes back to the list; the old link says it is gone
+        page.goto(app_url + f"/#/sets/{compact['id']}")
+        page.get_by_role("button", name="Delete").click()
+        page.locator("#del-confirm").click()
+        expect(page).to_have_url(re.compile("#/sets$"))
+        expect(page.locator(".set-card", has_text="Compact Setup 2")).to_have_count(0)
+        page.goto(app_url + f"/#/sets/{compact['id']}")
+        expect(page.get_by_role("heading", name="Set not found")).to_be_visible()
+
+        # the song keeps its copy of the set name as plain text once the set is gone
+        page.goto(app_url + f"/#/songs/{song['id']}")
+        expect(page.locator(".fact", has_text="Compact Setup")).to_be_visible()
+        expect(page.locator(".fact a", has_text="Compact Setup")).to_have_count(0)
+
+        browser.close()

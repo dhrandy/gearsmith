@@ -339,3 +339,10 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; min-hei
 }
 .block-edit > button, .block-fields > button { justify-self: start; }
 .block-fields > button { justify-self: end; }
+
+/* artists and presets */
+.artist-group { margin-bottom: 8px; }
+.artist-group h2 .count { font-size: 0.8rem; font-weight: 400; margin-left: 6px; }
+.preset-badge { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.preset-use .chain { margin-top: 10px; }
+.preset-use .stack { margin-top: 10px; }

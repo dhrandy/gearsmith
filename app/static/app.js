@@ -14,10 +14,28 @@ const state = {
   newToken: null, // freshly created API token, shown once until dismissed or you leave Settings
 };
 
-const TYPE_ICON = { guitar: "🎸", amp: "🔊", pedal: "🎛️", pick: "▲" };
-const TYPE_ORDER = ["guitar", "amp", "pedal", "pick"];
-const TYPE_LABEL = { guitar: "Guitars", amp: "Amps", pedal: "Pedals", pick: "Picks" };
-const FEATURE_FOR_TYPE = { guitar: "feature_guitars", amp: "feature_amps", pedal: "feature_pedals", pick: "feature_picks" };
+const TYPE_ICON = { guitar: "🎸", amp: "🔊", pedal: "🎛️", pick: "▲", strings: "≋" };
+const TYPE_ORDER = ["guitar", "amp", "pedal", "pick", "strings"];
+const TYPE_LABEL = { guitar: "Guitars", amp: "Amps", pedal: "Pedals", pick: "Picks", strings: "Strings" };
+const TYPE_SINGULAR = { guitar: "Guitar", amp: "Amp", pedal: "Pedal", pick: "Pick", strings: "Strings" };
+const FEATURE_FOR_TYPE = {
+  guitar: "feature_guitars", amp: "feature_amps", pedal: "feature_pedals", pick: "feature_picks", strings: "feature_strings",
+};
+const STRING_TYPES = [["electric", "Electric"], ["acoustic", "Acoustic"], ["classical", "Classical"], ["bass", "Bass"]];
+const STRING_TYPE_LABEL = Object.fromEntries(STRING_TYPES);
+
+// One line naming a strings item: "Brand 10-46 (Name)" style, kept short.
+function stringsLabel(s) {
+  if (!s) return "";
+  const bits = [s.name, s.gauge && !s.name.includes(s.gauge) ? s.gauge : ""].filter(Boolean);
+  return bits.join(" · ");
+}
+
+// Words a search box can match on: name, make, model and spec values like the gauge.
+function searchText(g) {
+  const specs = Object.values(g.specs || {}).filter((v) => typeof v === "string" || typeof v === "number");
+  return [g.name, g.make, g.model, ...specs].join(" ").toLowerCase();
+}
 
 function esc(value) {
   return String(value ?? "").replace(/[&<>"']/g, (ch) => (
@@ -251,16 +269,22 @@ async function gearListView(lifecycle = "owned") {
     ${lifecycle === "want" ? `<p class="muted">Gear you're after. When you buy one, edit it and switch it to Owned.</p>` : ""}
     ${lifecycle === "sold" ? `<p class="muted">Gear you've sold, kept as history. It stays out of the strings list and the main gear page.</p>` : ""}
     <div class="toolbar">
-      <input type="search" id="gear-search" placeholder="Filter by name, make, model..." />
+      <input type="search" id="gear-search" placeholder="Filter by name, make, model, gauge..." />
+      ${visibleTypes.includes("strings") && gear.some((g) => g.type === "strings") ? `<select id="string-type-filter" aria-label="String type">
+        <option value="">All string types</option>
+        ${STRING_TYPES.map(([k, label]) => `<option value="${k}">${label}</option>`).join("")}
+      </select>` : ""}
       ${owned ? `<button class="fav-filter" id="fav-only" type="button" aria-pressed="false"><span aria-hidden="true">☆</span> Favorites only</button>` : ""}
     </div>
     <div id="gear-sections"></div>`;
   const container = document.getElementById("gear-sections");
   const search = document.getElementById("gear-search");
   const favBtn = document.getElementById("fav-only");
+  const stringType = document.getElementById("string-type-filter");
   let onlyFavs = owned && favOnly();
   function render() {
     const needle = search.value.trim().toLowerCase();
+    const wantType = stringType ? stringType.value : "";
     if (favBtn) {
       favBtn.setAttribute("aria-pressed", String(onlyFavs));
       favBtn.classList.toggle("on", onlyFavs);
@@ -269,7 +293,8 @@ async function gearListView(lifecycle = "owned") {
     const html = sections.map(({ type, items }) => {
       const shown = items
         .filter((g) => !onlyFavs || g.favorite)
-        .filter((g) => !needle || `${g.name} ${g.make} ${g.model}`.toLowerCase().includes(needle))
+        .filter((g) => !needle || searchText(g).includes(needle))
+        .filter((g) => !wantType || g.type !== "strings" || g.specs?.string_type === wantType)
         .sort(byFavoriteThenName);
       if (!shown.length) return "";
       return `
@@ -284,6 +309,8 @@ async function gearListView(lifecycle = "owned") {
                 <span class="gc-meta" title="${esc([g.make, g.model].filter(Boolean).join(" · "))}">${esc([g.make, g.model].filter(Boolean).join(" · ")) || "&nbsp;"}</span>
                 <span class="gc-foot">
                   ${g.type === "guitar" ? stringsChip(g.strings) : ""}
+                  ${g.type === "strings" && g.specs?.gauge ? `<span class="badge">${esc(g.specs.gauge)}</span>` : ""}
+                  ${g.type === "strings" && g.specs?.string_type ? `<span class="badge">${esc(STRING_TYPE_LABEL[g.specs.string_type] || g.specs.string_type)}</span>` : ""}
                   ${lifecycleBadge(g)}
                   ${owned && g.status && g.status !== "home" ? `<span class="badge ${esc(g.status)}">${esc(g.status_label)}</span>` : ""}
                   ${g.sets.length ? `<span class="badge">${g.sets.length} set${g.sets.length > 1 ? "s" : ""}</span>` : ""}
@@ -301,6 +328,7 @@ async function gearListView(lifecycle = "owned") {
   }
   render();
   search.addEventListener("input", render);
+  if (stringType) stringType.addEventListener("change", render);
   if (favBtn) favBtn.addEventListener("click", () => {
     onlyFavs = !onlyFavs;
     setFavOnly(onlyFavs);
@@ -342,8 +370,13 @@ const SPEC_FIELDS = {
   amp: [["wattage", "Wattage"], ["speaker", "Speaker"], ["tubes", "Tubes"]],
   pedal: [["voltage", "Voltage"], ["ma_draw", "Current draw (mA)", "number"], ["polarity", "Polarity"], ["bypass", "Bypass"]],
   pick: [["thickness", "Thickness"], ["material", "Material"], ["quantity", "Quantity", "number"]],
+  strings: [
+    ["gauge", "Gauge"], ["string_type", "String type", "select", STRING_TYPES], ["material", "Material"],
+    ["strings_per_set", "Strings per set", "number"], ["sets_per_pack", "Sets per pack", "number"],
+  ],
 };
-const MAKE_LABEL = { guitar: "Make", amp: "Make", pedal: "Make", pick: "Brand" };
+const SPEC_PLACEHOLDER = { gauge: "e.g. 10-46", material: "", strings_per_set: "e.g. 6", sets_per_pack: "e.g. 3" };
+const MAKE_LABEL = { guitar: "Make", amp: "Make", pedal: "Make", pick: "Brand", strings: "Brand" };
 
 function gearForm(existing = null, lifecycle = "owned") {
   const g = existing || { type: "guitar", specs: {}, status: lifecycle === "owned" ? "home" : "", lifecycle };
@@ -354,7 +387,7 @@ function gearForm(existing = null, lifecycle = "owned") {
       <div class="form-grid">
         <div><label for="gf-type">Type</label>
           <select id="gf-type" ${existing ? "disabled" : ""}>
-            ${TYPE_ORDER.map((t) => `<option value="${t}" ${g.type === t ? "selected" : ""}>${TYPE_LABEL[t].slice(0, -1)}</option>`).join("")}
+            ${TYPE_ORDER.map((t) => `<option value="${t}" ${g.type === t ? "selected" : ""}>${TYPE_SINGULAR[t]}</option>`).join("")}
           </select>
         </div>
         <div><label for="gf-name">Name</label><input id="gf-name" required maxlength="80" value="${esc(g.name || "")}" placeholder="What you call it" /></div>
@@ -379,6 +412,10 @@ function gearForm(existing = null, lifecycle = "owned") {
             ${["home", "luthier", "lent"].map((s) => `<option value="${s}" ${g.status === s ? "selected" : ""}>${{ home: "Home", luthier: "At the luthier", lent: "Lent out" }[s]}</option>`).join("")}
           </select>
         </div>
+        <div id="gf-strings-wrap" ${g.type !== "guitar" ? "hidden" : ""}>
+          <label for="gf-strings">Strings used</label>
+          <select id="gf-strings"><option value="">None picked</option></select>
+        </div>
         <div id="gf-interval-wrap" ${g.type !== "guitar" ? "hidden" : ""}>
           <label for="gf-interval">Restring every (days)</label>
           <input id="gf-interval" type="number" min="1" max="730" value="${g.restring_interval_days ?? 90}" />
@@ -400,11 +437,28 @@ function gearForm(existing = null, lifecycle = "owned") {
     const t = typeSel.value;
     document.getElementById("gf-make-label").textContent = MAKE_LABEL[t];
     document.getElementById("gf-interval-wrap").hidden = t !== "guitar";
-    specsWrap.innerHTML = SPEC_FIELDS[t].map(([key, label, kind]) => `
-      <div><label for="gf-spec-${key}">${label}</label>
-      <input id="gf-spec-${key}" data-spec="${key}" ${kind === "number" ? 'type="number" step="any" min="0"' : ""}
-        value="${esc(t === g.type ? (g.specs?.[key] ?? "") : "")}" /></div>`).join("");
+    document.getElementById("gf-strings-wrap").hidden = t !== "guitar";
+    specsWrap.innerHTML = SPEC_FIELDS[t].map(([key, label, kind, options]) => {
+      const value = t === g.type ? (g.specs?.[key] ?? "") : "";
+      if (kind === "select") {
+        return `<div><label for="gf-spec-${key}">${label}</label>
+          <select id="gf-spec-${key}" data-spec="${key}"><option value="">Not set</option>
+          ${options.map(([k, l]) => `<option value="${k}" ${value === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>`;
+      }
+      const ph = t === "strings" && SPEC_PLACEHOLDER[key] ? ` placeholder="${esc(SPEC_PLACEHOLDER[key])}"` : "";
+      return `<div><label for="gf-spec-${key}">${label}</label>
+      <input id="gf-spec-${key}" data-spec="${key}" ${kind === "number" ? 'type="number" step="any" min="0"' : ""}${ph}
+        value="${esc(value)}" /></div>`;
+    }).join("");
   }
+  // Fill the "Strings used" picker from the strings you've added.
+  const stringsSel = document.getElementById("gf-strings");
+  api("/api/gear?type=strings").then((list) => {
+    const current = g.strings_id ?? null;
+    const shown = list.filter((s) => s.lifecycle !== "sold" || s.id === current);
+    stringsSel.innerHTML = `<option value="">None picked</option>` + shown.map((s) =>
+      `<option value="${s.id}" ${s.id === current ? "selected" : ""}>${esc(stringsLabel({ name: s.name, gauge: s.specs?.gauge }))}</option>`).join("");
+  }).catch(() => {});
   renderSpecs();
   typeSel.addEventListener("change", renderSpecs);
   const lifeSel = document.getElementById("gf-life");
@@ -437,6 +491,7 @@ function gearForm(existing = null, lifecycle = "owned") {
       purchase_price: document.getElementById("gf-pprice").value ? Number(document.getElementById("gf-pprice").value) : null,
       notes: document.getElementById("gf-notes").value,
       restring_interval_days: t === "guitar" ? Number(document.getElementById("gf-interval").value) : null,
+      strings_id: t === "guitar" && stringsSel.value ? Number(stringsSel.value) : null,
       lifecycle: lifeSel.value,
       want_price: numOrNull("gf-wprice"),
       sold_date: document.getElementById("gf-sdate").value || null,
@@ -463,6 +518,7 @@ async function gearDetailView(id) {
   const maintenance = featureOn("feature_maintenance");
   const facts = [
     [MAKE_LABEL[g.type], g.make], ["Model", g.model], ["Year", g.year], ["Serial", g.serial],
+    ["Strings", g.strings_used ? stringsLabel(g.strings_used) : ""],
     ["Status", g.status_label !== "Unspecified" ? g.status_label : ""],
     ["Purchased", [fmtDate(g.purchase_date), fmtPrice(g.purchase_price)].filter(Boolean).join(" for ")],
     ["Added by", g.added_by],
@@ -477,7 +533,7 @@ async function gearDetailView(id) {
         <button class="small danger" id="gd-delete" type="button">Delete</button>
       </div>
     </div>
-    <p class="muted wrap-any">${esc(g.type_label.slice(0, -1))}${g.sets.length ? " · in " + g.sets.map((s) => esc(s.name)).join(", ") : ""}</p>
+    <p class="muted wrap-any">${esc(g.type_singular || TYPE_SINGULAR[g.type])}${g.sets.length ? " · in " + g.sets.map((s) => esc(s.name)).join(", ") : ""}</p>
     ${g.lifecycle === "want" ? `<div class="life-banner want">On your want list${g.want_price != null ? ` · want price ${esc(fmtPrice(g.want_price))}` : ""}</div>` : ""}
     ${g.lifecycle === "sold" ? `<div class="life-banner sold">Sold${g.sold_date ? ` on ${esc(fmtDate(g.sold_date))}` : ""}${g.sold_price != null ? ` for ${esc(fmtPrice(g.sold_price))}` : ""} · kept as history</div>` : ""}
     <div class="hero">
@@ -485,10 +541,10 @@ async function gearDetailView(id) {
       <div>
         ${g.type === "guitar" && maintenance && g.strings ? `<p>${stringsChip(g.strings, true)}</p>` : ""}
         <div class="facts">
-          ${facts.map(([k, v]) => `<div class="fact"><span>${esc(k)}</span>${esc(v)}</div>`).join("")}
+          ${facts.map(([k, v]) => `<div class="fact"><span>${esc(k)}</span>${k === "Strings" && g.strings_used ? `<a href="#/gear/${g.strings_used.id}">${esc(v)}</a>` : esc(v)}</div>`).join("")}
         </div>
         ${specs.length ? `<h2>Specs</h2><div class="facts">
-          ${specs.map((f) => `<div class="fact"><span>${esc(f.label)}</span>${esc(f.value)}</div>`).join("")}
+          ${specs.map((f) => `<div class="fact"><span>${esc(f.label)}</span>${esc(f.key === "string_type" ? (STRING_TYPE_LABEL[f.value] || f.value) : f.value)}</div>`).join("")}
         </div>` : ""}
         ${g.notes ? `<h2>Notes</h2><p class="notes">${esc(g.notes)}</p>` : ""}
       </div>
@@ -518,7 +574,15 @@ async function gearDetailView(id) {
         <button class="primary small" id="log-restring" type="button">Log a restring</button>
       </div>
       <p class="hint wrap-any">Changed every ${g.strings.interval_days} days${g.strings.last_date ? ` · last: ${esc(g.strings.last_brand || "unknown")} ${esc(g.strings.last_gauge || "")} on ${fmtDate(g.strings.last_date)}` : ""}.</p>
+      <p class="hint wrap-any" id="gd-strings-used">Uses: ${g.strings_used ? `<a href="#/gear/${g.strings_used.id}">${esc(stringsLabel(g.strings_used))}</a>` : `none picked yet. Edit the guitar or log a restring to pick from your strings.`}</p>
       <div id="restring-history" class="stack" style="margin-top:10px"></div>
+    </div>` : ""}
+    ${g.type === "strings" ? `
+    <h2>Used on</h2>
+    <div class="card" id="gd-used-on">
+      <div class="set-chips">
+        ${(g.used_on || []).length ? g.used_on.map((u) => `<a class="set-chip link-chip" href="#/gear/${u.id}" title="${esc(u.name)}">${esc(u.name)}</a>`).join("") : `<span class="muted">No guitar uses these yet. Pick them in a guitar's edit form or when you log a restring.</span>`}
+      </div>
     </div>` : ""}
     ${CONTROL_TYPES.includes(g.type) ? `
     <h2>Controls</h2>
@@ -561,7 +625,7 @@ async function gearDetailView(id) {
   document.getElementById("gd-delete").addEventListener("click", () => {
     openSheet(`
       <h2>Delete ${esc(g.name)}?</h2>
-      <p class="muted">This removes the ${esc(g.type_label.slice(0, -1).toLowerCase())}, its photos${g.type === "guitar" ? " and its restring history" : ""}. It stays in no sets.</p>
+      <p class="muted">This removes ${g.type === "strings" ? "these strings" : `the ${esc(TYPE_SINGULAR[g.type].toLowerCase())}`}, its photos${g.type === "guitar" ? " and its restring history" : ""}. It stays in no sets.${g.type === "strings" ? " Guitars and restring entries that used them keep the brand and gauge as text." : ""}</p>
       <div class="sheet-actions">
         <button type="button" id="del-cancel">Cancel</button>
         <button class="primary danger" id="del-confirm" type="button">Delete</button>
@@ -800,7 +864,7 @@ async function loadRestringHistory(g) {
   el.innerHTML = rows.length ? rows.map((r) => `
     <div class="restring-row">
       <span class="rs-date">${fmtDate(r.date)}</span>
-      <span>${esc([r.brand, r.gauge].filter(Boolean).join(" ")) || "Restring"}${r.note ? ` <span class="muted">- ${esc(r.note)}</span>` : ""}
+      <span>${r.strings ? `<a href="#/gear/${r.strings.id}">${esc([r.brand, r.gauge].filter(Boolean).join(" ") || r.strings.name)}</a>` : esc([r.brand, r.gauge].filter(Boolean).join(" ")) || "Restring"}${r.note ? ` <span class="muted">- ${esc(r.note)}</span>` : ""}
         <span class="muted"> · ${esc(r.logged_by)}</span></span>
       <button class="small ghost danger" data-delrs="${r.id}" type="button">Delete</button>
     </div>`).join("") : `<p class="muted">No restrings logged yet.</p>`;
@@ -817,6 +881,8 @@ function restringForm(g) {
     <h2>Log a restring - ${esc(g.name)}</h2>
     <form id="rs-form" class="stack">
       <div class="form-grid">
+        <div class="full"><label for="rs-strings">From your strings</label>
+          <select id="rs-strings"><option value="">None - type the brand and gauge</option></select></div>
         <div><label for="rs-brand">String brand</label><input id="rs-brand" maxlength="80" placeholder="e.g. Example Co" /></div>
         <div><label for="rs-gauge">Gauge</label><input id="rs-gauge" maxlength="40" value="${esc(g.specs?.string_gauge || "")}" placeholder="e.g. 10-46" /></div>
         <div><label for="rs-date">Date</label><input id="rs-date" type="date" value="${todayStr}" max="${todayStr}" /></div>
@@ -829,6 +895,24 @@ function restringForm(g) {
       </div>
     </form>`);
   document.getElementById("rs-cancel").addEventListener("click", closeSheet);
+  const rsStrings = document.getElementById("rs-strings");
+  const rsBrand = document.getElementById("rs-brand");
+  const rsGauge = document.getElementById("rs-gauge");
+  let stringsList = [];
+  function fillFromStrings() {
+    const s = stringsList.find((x) => x.id === Number(rsStrings.value));
+    if (!s) return;
+    rsBrand.value = s.make || s.name;
+    if (s.specs?.gauge) rsGauge.value = s.specs.gauge;
+  }
+  api("/api/gear?type=strings").then((list) => {
+    stringsList = list.filter((s) => s.lifecycle === "owned");
+    const current = g.strings_id ?? null;
+    rsStrings.innerHTML = `<option value="">None - type the brand and gauge</option>` + stringsList.map((s) =>
+      `<option value="${s.id}" ${s.id === current ? "selected" : ""}>${esc(stringsLabel({ name: s.name, gauge: s.specs?.gauge }))}</option>`).join("");
+    if (rsStrings.value) fillFromStrings();
+  }).catch(() => {});
+  rsStrings.addEventListener("change", fillFromStrings);
   document.getElementById("rs-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     try {
@@ -839,6 +923,7 @@ function restringForm(g) {
           gauge: document.getElementById("rs-gauge").value,
           date: document.getElementById("rs-date").value || null,
           note: document.getElementById("rs-note").value,
+          strings_id: rsStrings.value ? Number(rsStrings.value) : null,
         },
       });
       closeSheet();
@@ -1675,7 +1760,7 @@ async function setForm(existing = null) {
 async function dueView() {
   const items = await api("/api/due?days=14");
   view.innerHTML = `
-    <div class="pagehead"><h1>Strings</h1></div>
+    <div class="pagehead"><h1>Restrings</h1></div>
     <p class="muted">Guitars past their restring interval, or close to it. Log a restring to reset the counter.</p>
     <div class="due-list" id="due-list">
       ${items.length ? items.map((i) => `
@@ -1726,7 +1811,7 @@ async function settingsView() {
       <p class="hint">Hide the sections you don't use. Hidden sections keep their data; they just leave the interface.</p>
       ${[
         ["feature_guitars", "Guitars"], ["feature_amps", "Amps"], ["feature_pedals", "Pedals"],
-        ["feature_picks", "Picks"], ["feature_sets", "Sets (rigs and boards)"],
+        ["feature_picks", "Picks"], ["feature_strings", "Strings (string packs)"], ["feature_sets", "Sets (rigs and boards)"],
         ["feature_maintenance", "Maintenance (restring tracking)"],
         ["feature_songs", "Songs (rig and tone settings per song)"], ["feature_want", "Want list"],
         ["feature_sold", "Sold archive"],

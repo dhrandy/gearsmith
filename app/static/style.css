@@ -88,6 +88,7 @@ h2 { font-size: 18px; margin: 22px 0 10px; }
 .count { font-size: 12px; border-radius: 999px; padding: 1px 8px; background: var(--panel2); color: var(--muted); }
 .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
 .toolbar input[type=search] { flex: 1; min-width: 160px; }
+.toolbar select { width: auto; flex: 0 0 auto; max-width: 100%; }
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
 .gear-card {
   display: flex; gap: 12px; align-items: center; text-decoration: none; color: var(--text);

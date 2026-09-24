@@ -110,8 +110,8 @@ def test_mobile_add_restring_from_due(app_url):
         page = browser.new_page(viewport={"width": 390, "height": 844})
         sign_in(page, app_url)
 
-        page.get_by_role("link", name="Strings", exact=True).click()
-        expect(page.get_by_role("heading", name="Strings", exact=True)).to_be_visible()
+        page.get_by_role("link", name="Restrings", exact=True).click()
+        expect(page.get_by_role("heading", name="Restrings", exact=True)).to_be_visible()
         browser.close()
 
 
@@ -554,4 +554,75 @@ def test_presets_follow_songs_and_artist_view(app_url, width, height):
         page.goto(app_url + "/#/presets")
         expect(page.locator(".preset-card")).to_have_count(2)
         assert_no_overflow(page, "presets list")
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1920, 1080), (390, 844)])
+def test_strings_type_and_guitar_picks_strings(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+
+        # the demo strings show in their own section with gauge and type badges
+        expect(page.get_by_role("heading", name=re.compile("^Strings"))).to_be_visible()
+        card = page.locator(".gear-card", has_text="Demo Strings 10-46")
+        expect(card.get_by_text("Electric")).to_be_visible()
+
+        # add a strings item through the form
+        page.get_by_role("button", name="Add gear").click()
+        page.locator("#gf-type").select_option("strings")
+        expect(page.locator("#gf-make-label")).to_have_text("Brand")
+        expect(page.locator("#gf-strings-wrap")).to_be_hidden()
+        page.locator("#gf-name").fill("Ui Strings 9-42")
+        page.locator("#gf-make").fill("Ui Brand")
+        page.locator("#gf-spec-gauge").fill("9-42")
+        page.locator("#gf-spec-string_type").select_option("electric")
+        page.locator("#gf-spec-sets_per_pack").fill("2")
+        page.locator("#gear-form").get_by_role("button", name="Add gear", exact=True).click()
+        expect(page.get_by_role("heading", name="Ui Strings 9-42", exact=True)).to_be_visible()
+        expect(page.get_by_text("No guitar uses these yet")).to_be_visible()
+        strings_url = page.url
+
+        # search matches the gauge, the string-type filter narrows the strings section
+        page.goto(app_url + "/#/")
+        page.locator("#gear-search").fill("9-42")
+        expect(page.locator(".gear-card")).to_have_count(1)
+        page.locator("#gear-search").fill("")
+        page.locator("#string-type-filter").select_option("bass")
+        expect(page.locator(".gear-card", has_text="Ui Strings 9-42")).to_have_count(0)
+        expect(page.locator(".gear-card", has_text="Starling")).to_have_count(1)
+        page.locator("#string-type-filter").select_option("")
+        page.screenshot(path=f"/tmp/strings-list-{width}.png", full_page=True)
+
+        # pick the strings on a guitar
+        page.locator(".gear-card", has_text="Heron").click()
+        expect(page.get_by_role("heading", name="Heron", exact=True)).to_be_visible()
+        page.get_by_role("button", name="Edit", exact=True).click()
+        expect(page.locator("#gf-strings option", has_text="Ui Strings 9-42")).to_have_count(1)
+        page.locator("#gf-strings").select_option(label="Ui Strings 9-42")
+        page.get_by_role("button", name="Save changes").click()
+        expect(page.locator("#gd-strings-used").get_by_role("link", name="Ui Strings 9-42")).to_be_visible()
+
+        # log a restring from your strings: the picker is preset and fills brand and gauge
+        page.get_by_role("button", name="Log a restring").click()
+        expect(page.locator("#rs-gauge")).to_have_value("9-42")
+        expect(page.locator("#rs-brand")).to_have_value("Ui Brand")
+        page.locator("#rs-strings").select_option(label="Demo Strings 10-46")
+        expect(page.locator("#rs-gauge")).to_have_value("10-46")
+        page.get_by_role("button", name="Log restring").click()
+        expect(page.locator("#restring-history").get_by_role("link", name="Demo Strings 10-46")).to_be_visible()
+        expect(page.locator("#gd-strings-used").get_by_role("link", name="Demo Strings 10-46")).to_be_visible()
+        page.screenshot(path=f"/tmp/strings-guitar-{width}.png", full_page=True)
+
+        # the strings page lists the guitar that uses them
+        page.goto(app_url + "/#/")
+        page.locator(".gear-card", has_text="Demo Strings 10-46").click()
+        expect(page.locator("#gd-used-on").get_by_role("link", name="Heron")).to_be_visible()
+        expect(page.locator("#gd-used-on").get_by_role("link", name="Starling")).to_be_visible()
+        page.screenshot(path=f"/tmp/strings-detail-{width}.png", full_page=True)
+        assert strings_url
+
+        # no sideways scrolling on a phone
+        assert page.evaluate("document.documentElement.scrollWidth") <= width + 1
         browser.close()

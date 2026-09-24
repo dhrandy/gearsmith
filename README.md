@@ -15,6 +15,8 @@
 - **Restring tracking** - log a restring (brand, gauge, date) and each guitar gets a "strings: N days" chip that turns yellow as the interval nears and red when it's overdue. Every guitar has its own restring interval.
 - **Favorites** - tap the star on any card or on the gear page to mark a favorite. Favorites sit at the top of their section, and the "Favorites only" button on the Gear page hides everything else (it remembers your choice on that device).
 - **Songs** - a recall sheet for every song you play: tuning, capo, key, BPM, the guitar and amp, and the knob settings on each pedal and amp in the chain (on, off, or toggled mid-song). Knob positions are free text, so "2:00", "noon", "max", and "7.5" all work. Multi-effects units and modelers (Helix, Quad Cortex, Kemper, and so on) get patch pointers instead: patch number and name, scenes, MIDI notes, and an optional list of effect blocks. Add photos of your board or a handwritten sheet. Each gear page lists the songs that use it.
+- **Presets** - save a tone once (the chain, knob settings, patches, and amp) under a name like "Classic crunch" or "Ambient clean", then use it in any song. Presets stay linked: change the preset and every song using it shows the new settings. A song can use several presets with labels ("Verse", "Solo"), plus its own settings on top. Turn a song's chain into a preset with **Save as preset**, or use **Copy into song** when one song needs its own tweaked version.
+- **Artists** - the Songs tab has an Artists view that groups your songs and presets by artist, so everything for one band sits together. Grouping ignores capitalization and extra spaces.
 - **Knob names per pedal** - give a pedal or amp its own control names (Gain, Tone, Level...) and the song editor fills them in for you. Mark a pedal as a modeler to track patches for it instead of knobs.
 - **Want and Sold lists** - gear you're after (with a target price) and gear you've sold (with sale date and price) live in their own views next to what you own. Sold gear is dimmed and never shows up in the restring due list or notifications.
 - **Share links** - make a read-only link to one piece of gear or a whole set to send to a buyer, a tech, or a friend. Links use a random token, can expire (7, 30, or 90 days, or never), and can be turned off or replaced at any time. Shared pages hide serial numbers and prices, show no links back into your app, and tell search engines not to index them.
@@ -102,11 +104,18 @@ finds songs using a piece of gear), read, update or delete one (GET/PATCH/DELETE
 notes, a "rig" list (gear_id, engaged on/off/toggle, knobs as [{name, value}] with text
 values) and a "patches" list for modelers (gear_id, patch_ref, patch_name, scenes, note).
 Edit single entries with /api/v1/songs/{id}/rig/{setting_id} and
-/api/v1/songs/{id}/patches/{patch_id}.
+/api/v1/songs/{id}/patches/{patch_id}. ?artist= lists one artist's songs.
+Presets: list and add (GET/POST /api/v1/presets), read, update or delete one
+(GET/PATCH/DELETE /api/v1/presets/{id}). A preset has name, artist, amp_id, notes, and the
+same "rig" and "patches" lists as a song. Songs point at presets with a "presets" list
+([{preset_id, label, note}]); editing a preset changes every song that uses it.
+POST /api/v1/songs/{id}/save-as-preset (name, use_in_song) turns a song's chain into a preset.
+Artists: GET /api/v1/artists returns songs and presets grouped by artist.
 Share links: create or replace one (POST /api/v1/gear/{id}/share or /api/v1/sets/{id}/share
 with optional expires_in_days and regenerate), read it (GET) or turn it off (DELETE).
 When I tell you I restrung a guitar, log it. When I ask what needs new strings, check the
-due list. When I tell you how I set my rig for a song, save it on that song.
+due list. When I tell you how I set my rig for a song, save it on that song. When I
+describe a tone I use in several songs, save it as a preset and link those songs to it.
 ```
 
 Treat tokens like passwords - anyone holding one can read and change your gear.

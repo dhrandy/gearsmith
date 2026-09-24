@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.5.1"
+APP_VERSION = "0.5.2"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -1343,6 +1343,88 @@ def get_collection(request: Request):
     current_user(request)
     with db() as c:
         return collection_summary(c)
+
+
+def search_needle(q: str) -> str:
+    """A LIKE pattern that treats %, _ and backslashes in the query as plain characters."""
+    return "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+@app.get("/api/search")
+def search_everything(request: Request, q: str = "", limit: int = 8):
+    """The header search box: one query across gear, songs, artists, presets, sets and setlists."""
+    current_user(request)
+    q = q.strip()[:80]
+    out: dict[str, Any] = {
+        "q": q, "gear": [], "songs": [], "presets": [], "sets": [], "setlists": [], "artists": [],
+    }
+    if not q:
+        return out
+    limit = max(1, min(limit, 25))
+    needle = search_needle(q)
+    with db() as c:
+        out["gear"] = [
+            {
+                "id": r["id"], "type": r["type"], "type_label": GEAR_TYPE_LABELS[r["type"]],
+                "name": r["name"], "make": r["make"], "model": r["model"],
+                "lifecycle": r["lifecycle"],
+                "lifecycle_label": LIFECYCLE_LABELS.get(r["lifecycle"], r["lifecycle"]),
+            }
+            for r in c.execute(
+                """SELECT id,type,name,make,model,lifecycle FROM gear
+                WHERE name LIKE ? ESCAPE '\\' OR make LIKE ? ESCAPE '\\' OR model LIKE ? ESCAPE '\\'
+                   OR notes LIKE ? ESCAPE '\\' OR specs LIKE ? ESCAPE '\\'
+                ORDER BY favorite DESC, name COLLATE NOCASE LIMIT ?""",
+                (needle, needle, needle, needle, needle, limit),
+            )
+        ]
+        out["songs"] = [
+            {"id": r["id"], "title": r["title"], "artist": r["artist"]}
+            for r in c.execute(
+                """SELECT id,title,artist FROM songs
+                WHERE title LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\'
+                ORDER BY title COLLATE NOCASE LIMIT ?""",
+                (needle, needle, limit),
+            )
+        ]
+        out["presets"] = [
+            {"id": r["id"], "name": r["name"], "artist": r["artist"]}
+            for r in c.execute(
+                """SELECT id,name,artist FROM presets
+                WHERE name LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\'
+                ORDER BY name COLLATE NOCASE LIMIT ?""",
+                (needle, needle, limit),
+            )
+        ]
+        out["sets"] = [
+            {"id": r["id"], "name": r["name"]}
+            for r in c.execute(
+                "SELECT id,name FROM sets WHERE name LIKE ? ESCAPE '\\' ORDER BY name COLLATE NOCASE LIMIT ?",
+                (needle, limit),
+            )
+        ]
+        out["setlists"] = [
+            {"id": r["id"], "name": r["name"]}
+            for r in c.execute(
+                "SELECT id,name FROM setlists WHERE name LIKE ? ESCAPE '\\' ORDER BY name COLLATE NOCASE LIMIT ?",
+                (needle, limit),
+            )
+        ]
+        # Artists whose name matches, grouped ignoring case and stray spaces, with their counts
+        counts: dict[str, dict[str, Any]] = {}
+        for kind, table in (("song_count", "songs"), ("preset_count", "presets")):
+            for r in c.execute(
+                f"SELECT artist FROM {table} WHERE artist LIKE ? ESCAPE '\\'", (needle,)
+            ):
+                tidy = " ".join((r["artist"] or "").split())
+                if not tidy:
+                    continue
+                entry = counts.setdefault(tidy.lower(), {"artist": tidy, "song_count": 0, "preset_count": 0})
+                if entry["artist"].islower() and not tidy.islower():
+                    entry["artist"] = tidy  # prefer "AC/DC" over "ac/dc" for the label
+                entry[kind] += 1
+        out["artists"] = sorted(counts.values(), key=lambda a: a["artist"].lower())[:limit]
+    return out
 
 
 @app.get("/api/gear")

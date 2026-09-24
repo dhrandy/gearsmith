@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.3.2"
+APP_VERSION = "0.4.0"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -188,7 +188,8 @@ async def security_headers(request: Request, call_next):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Permissions-Policy"] = "geolocation=(), microphone=()"
+    # the built-in tuner uses the mic; it stays on-device (no capture leaves the page)
+    response.headers["Permissions-Policy"] = "geolocation=(), microphone=(self)"
     if request.url.path == "/api/docs":
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'; "
@@ -292,6 +293,8 @@ def init_db() -> None:
           want_price REAL,
           sold_date TEXT,
           sold_price REAL,
+          sets_on_hand INTEGER,
+          manual_url TEXT NOT NULL DEFAULT '',
           strings_id INTEGER REFERENCES gear(id) ON DELETE SET NULL,
           created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
           created_at TEXT NOT NULL,
@@ -442,6 +445,15 @@ def init_db() -> None:
           params TEXT NOT NULL DEFAULT '[]',
           scene_overrides TEXT
         );
+        CREATE TABLE IF NOT EXISTS maintenance (
+          id INTEGER PRIMARY KEY,
+          gear_id INTEGER NOT NULL REFERENCES gear(id) ON DELETE CASCADE,
+          date TEXT NOT NULL,
+          category TEXT NOT NULL DEFAULT 'other',
+          note TEXT NOT NULL DEFAULT '',
+          user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          created_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS song_presets (
           id INTEGER PRIMARY KEY,
           song_id INTEGER NOT NULL REFERENCES songs(id) ON DELETE CASCADE,
@@ -462,6 +474,7 @@ def init_db() -> None:
         CREATE INDEX IF NOT EXISTS idx_song_photos ON song_photos(song_id);
         CREATE INDEX IF NOT EXISTS idx_restrings_gear ON restrings(gear_id, date);
         CREATE INDEX IF NOT EXISTS idx_photos_gear ON gear_photos(gear_id);
+        CREATE INDEX IF NOT EXISTS idx_maintenance_gear ON maintenance(gear_id, date);
         """
         )
         migrate(c)
@@ -488,6 +501,11 @@ def migrate(c) -> None:
     widen_gear_types(c)
     if "strings_id" not in gear_cols:
         c.execute("ALTER TABLE gear ADD COLUMN strings_id INTEGER REFERENCES gear(id) ON DELETE SET NULL")
+    # 0.4.0: strings can track sets on hand, and every item can carry a manual link.
+    if "sets_on_hand" not in gear_cols:
+        c.execute("ALTER TABLE gear ADD COLUMN sets_on_hand INTEGER")
+    if "manual_url" not in gear_cols:
+        c.execute("ALTER TABLE gear ADD COLUMN manual_url TEXT NOT NULL DEFAULT ''")
     restring_cols = {r["name"] for r in c.execute("PRAGMA table_info(restrings)")}
     if "strings_id" not in restring_cols:
         c.execute("ALTER TABLE restrings ADD COLUMN strings_id INTEGER REFERENCES gear(id) ON DELETE SET NULL")
@@ -609,6 +627,7 @@ def seed_example(c) -> None:
          "strings_per_set": 6, "sets_per_pack": 3},
     )
     c.execute("UPDATE gear SET strings_id=? WHERE id=?", (demo_strings, starling))
+    c.execute("UPDATE gear SET sets_on_hand=3 WHERE id=?", (demo_strings,))
 
     # One guitar fresh, one overdue, so both chip states are visible.
     old = (today() - timedelta(days=100)).isoformat()
@@ -818,7 +837,7 @@ def me(request: Request):
 # ---------------------------------------------------------------- optional features
 
 # Hideable sections: each gear type, sets, and the maintenance loop.
-FEATURES = ("guitars", "amps", "pedals", "picks", "strings", "sets", "maintenance", "songs", "want", "sold")
+FEATURES = ("guitars", "amps", "pedals", "picks", "strings", "sets", "maintenance", "songs", "want", "sold", "tuner")
 FEATURE_LABELS = {
     "guitars": "Guitars section",
     "amps": "Amps section",
@@ -839,6 +858,13 @@ def feature_on(c, name: str) -> bool:
 
 
 # ---------------------------------------------------------------- gear
+
+
+def check_url(value: str | None) -> str:
+    v = (value or "").strip()
+    if v and not re.match(r"^https?://", v, re.I):
+        raise ValueError("Links must start with http:// or https://")
+    return v
 
 
 def clean_controls(value: Any) -> list[dict[str, str]]:
@@ -863,7 +889,11 @@ def clean_controls(value: Any) -> list[dict[str, str]]:
         if kind not in CONTROL_KINDS:
             raise HTTPException(400, "Control kind must be knob or switch")
         seen.add(name.lower())
-        out.append({"name": name, "kind": kind})
+        entry = {"name": name, "kind": kind}
+        value = str(item.get("value") or "").strip()[:40]
+        if value:
+            entry["value"] = value
+        out.append(entry)
     return out
 
 
@@ -1010,6 +1040,17 @@ def gear_sets(c, gear_id: int) -> list[dict[str, Any]]:
     return [{"id": r["id"], "name": r["name"]} for r in rows]
 
 
+def stock_state(row) -> str | None:
+    """Strings supply at a glance: untracked, out, one left, or fine."""
+    if row["sets_on_hand"] is None:
+        return None
+    if row["sets_on_hand"] <= 0:
+        return "out"
+    if row["sets_on_hand"] == 1:
+        return "low"
+    return "ok"
+
+
 def gear_dict(c, row, on: date | None = None) -> dict[str, Any]:
     specs = json.loads(row["specs"] or "{}")
     photos = photo_list(c, row["id"])
@@ -1040,6 +1081,9 @@ def gear_dict(c, row, on: date | None = None) -> dict[str, Any]:
         "want_price": row["want_price"],
         "sold_date": row["sold_date"],
         "sold_price": row["sold_price"],
+        "manual_url": row["manual_url"],
+        "sets_on_hand": row["sets_on_hand"] if row["type"] == "strings" else None,
+        "stock_state": stock_state(row) if row["type"] == "strings" else None,
         "controls": specs.get("controls", []),
         "modeler": bool(specs.get("modeler")),
         "share": share_info(c, "gear", row["id"]),
@@ -1080,11 +1124,18 @@ class GearIn(BaseModel):
     sold_date: str | None = None
     sold_price: float | None = Field(default=None, ge=0, le=10_000_000)
     strings_id: int | None = Field(default=None, description="Guitars only: the strings item this guitar uses")
+    sets_on_hand: int | None = Field(default=None, ge=0, le=999, description="Strings only: unopened sets in stock")
+    manual_url: str = Field(default="", max_length=300, description="Link to the manual, shown as a button")
 
     @field_validator("purchase_date", "sold_date")
     @classmethod
     def _date(cls, v):
         return check_date(v)
+
+    @field_validator("manual_url")
+    @classmethod
+    def _url(cls, v):
+        return check_url(v)
 
 
 class GearPatch(BaseModel):
@@ -1105,11 +1156,18 @@ class GearPatch(BaseModel):
     sold_date: str | None = None
     sold_price: float | None = Field(default=None, ge=0, le=10_000_000)
     strings_id: int | None = Field(default=None, description="Guitars only: the strings item this guitar uses")
+    sets_on_hand: int | None = Field(default=None, ge=0, le=999, description="Strings only: unopened sets in stock")
+    manual_url: str | None = Field(default=None, max_length=300, description="Link to the manual, shown as a button")
 
     @field_validator("purchase_date", "sold_date")
     @classmethod
     def _date(cls, v):
         return check_date(v)
+
+    @field_validator("manual_url")
+    @classmethod
+    def _url(cls, v):
+        return check_url(v) if v is not None else v
 
 
 def create_gear(c, body: GearIn, user_id: int | None) -> int:
@@ -1117,19 +1175,21 @@ def create_gear(c, body: GearIn, user_id: int | None) -> int:
         raise HTTPException(400, "Only guitars have a restring interval")
     if body.type != "guitar" and body.strings_id is not None:
         raise HTTPException(400, "Only guitars use a strings item")
+    if body.type != "strings" and body.sets_on_hand is not None:
+        raise HTTPException(400, "Only strings track sets on hand")
     check_strings_id(c, body.strings_id)
     stamp = now_iso()
     return c.execute(
         """INSERT INTO gear(type,name,make,model,year,serial,specs,status,purchase_date,
            purchase_price,notes,restring_interval_days,favorite,lifecycle,want_price,sold_date,
-           sold_price,strings_id,created_by,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           sold_price,sets_on_hand,manual_url,strings_id,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             body.type, body.name.strip(), body.make.strip(), body.model.strip(), body.year,
             body.serial.strip(), json.dumps(clean_specs(body.type, body.specs)), body.status,
             body.purchase_date, body.purchase_price, body.notes.strip(), body.restring_interval_days,
             int(bool(body.favorite)), body.lifecycle or "owned", body.want_price, body.sold_date,
-            body.sold_price, body.strings_id, user_id, stamp, stamp,
+            body.sold_price, body.sets_on_hand, body.manual_url, body.strings_id, user_id, stamp, stamp,
         ),
     ).lastrowid
 
@@ -1149,6 +1209,16 @@ def patch_gear(c, row, body: GearPatch) -> None:
             data.pop("strings_id")
         else:
             check_strings_id(c, data["strings_id"])
+    if "sets_on_hand" in data:
+        # null means "leave it alone", same rule as favorite
+        value = data.pop("sets_on_hand")
+        if value is not None:
+            if row["type"] != "strings":
+                raise HTTPException(400, "Only strings track sets on hand")
+            data["sets_on_hand"] = value
+    if "manual_url" in data and data["manual_url"] is None:
+        # null leaves the link alone
+        data.pop("manual_url")
     if "favorite" in data:
         # null means "leave it alone", so a full PUT from an older client never clears the star
         favorite = data.pop("favorite")
@@ -1322,6 +1392,12 @@ def log_restring(c, gear_id: int, body: RestringIn, user_id: int | None, via: st
         c.execute("UPDATE gear SET specs=? WHERE id=?", (json.dumps(specs), gear_id))
     if body.strings_id is not None:
         c.execute("UPDATE gear SET strings_id=? WHERE id=?", (body.strings_id, gear_id))
+        # One set comes out of stock; it never dips below zero. Deleting the entry later
+        # does not put it back - stock is adjusted by hand on the strings page.
+        c.execute(
+            "UPDATE gear SET sets_on_hand=MAX(sets_on_hand - 1, 0) WHERE id=? AND sets_on_hand IS NOT NULL",
+            (body.strings_id,),
+        )
     c.execute("UPDATE gear SET updated_at=? WHERE id=?", (now_iso(), gear_id))
     return rid
 
@@ -1355,6 +1431,131 @@ def delete_restring(restring_id: int, request: Request):
             raise HTTPException(404, "Restring not found")
         c.execute("DELETE FROM restrings WHERE id=?", (restring_id,))
         return {"ok": True}
+
+
+# ---------------------------------------------------------------- maintenance log
+# A per-item service history: setups, tube swaps, fret work, repairs, anything else.
+# Restrings keep their own log above.
+
+MAINTENANCE_CATEGORIES = ("setup", "tubes", "fret work", "repair", "other")
+
+
+class MaintenanceIn(BaseModel):
+    date: str | None = None
+    category: Literal["setup", "tubes", "fret work", "repair", "other"] = "other"
+    note: str = Field(default="", max_length=1000)
+
+    @field_validator("date")
+    @classmethod
+    def _date(cls, v):
+        return check_date(v)
+
+
+class MaintenancePatch(BaseModel):
+    date: str | None = None
+    category: Literal["setup", "tubes", "fret work", "repair", "other"] | None = None
+    note: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("date")
+    @classmethod
+    def _date(cls, v):
+        return check_date(v)
+
+
+def maintenance_dict(c, row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "gear_id": row["gear_id"],
+        "date": row["date"],
+        "category": row["category"],
+        "note": row["note"],
+        "logged_by": display_user(c, row["user_id"]) or "System",
+        "created_at": row["created_at"],
+    }
+
+
+def get_maintenance_row(c, entry_id: int):
+    row = c.execute("SELECT * FROM maintenance WHERE id=?", (entry_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Maintenance entry not found")
+    return row
+
+
+def maintenance_list(c, gear_id: int) -> list[dict[str, Any]]:
+    get_gear_row(c, gear_id)
+    rows = c.execute(
+        "SELECT * FROM maintenance WHERE gear_id=? ORDER BY date DESC, id DESC", (gear_id,)
+    ).fetchall()
+    return [maintenance_dict(c, r) for r in rows]
+
+
+def log_maintenance(c, gear_id: int, body: MaintenanceIn, user_id: int | None) -> int:
+    get_gear_row(c, gear_id)
+    when = iso_date(body.date) if body.date else today()
+    if when is None:
+        raise HTTPException(400, "Dates must be YYYY-MM-DD")
+    if when > today():
+        raise HTTPException(400, "Maintenance can't be logged in the future")
+    return c.execute(
+        "INSERT INTO maintenance(gear_id,date,category,note,user_id,created_at) VALUES(?,?,?,?,?,?)",
+        (gear_id, when.isoformat(), body.category, body.note.strip(), user_id, now_iso()),
+    ).lastrowid
+
+
+def edit_maintenance(c, entry_id: int, body: MaintenancePatch) -> dict[str, Any]:
+    get_maintenance_row(c, entry_id)
+    data = body.model_dump(exclude_unset=True)
+    if "date" in data:
+        if data["date"] is None:
+            data.pop("date")
+        else:
+            when = iso_date(data["date"])
+            if when is None:
+                raise HTTPException(400, "Dates must be YYYY-MM-DD")
+            if when > today():
+                raise HTTPException(400, "Maintenance can't be logged in the future")
+            data["date"] = when.isoformat()
+    if "note" in data and data["note"] is not None:
+        data["note"] = data["note"].strip()
+    if data:
+        cols = ", ".join(f"{k}=?" for k in data)
+        c.execute(f"UPDATE maintenance SET {cols} WHERE id=?", (*data.values(), entry_id))
+    return maintenance_dict(c, get_maintenance_row(c, entry_id))
+
+
+def delete_maintenance_entry(c, entry_id: int) -> dict[str, Any]:
+    get_maintenance_row(c, entry_id)
+    c.execute("DELETE FROM maintenance WHERE id=?", (entry_id,))
+    return {"ok": True}
+
+
+@app.get("/api/gear/{gear_id}/maintenance")
+def list_gear_maintenance(gear_id: int, request: Request):
+    current_user(request)
+    with db() as c:
+        return maintenance_list(c, gear_id)
+
+
+@app.post("/api/gear/{gear_id}/maintenance", status_code=201)
+def add_maintenance(gear_id: int, body: MaintenanceIn, request: Request):
+    user = current_user(request)
+    with db() as c:
+        entry_id = log_maintenance(c, gear_id, body, user["id"])
+        return maintenance_dict(c, get_maintenance_row(c, entry_id))
+
+
+@app.patch("/api/maintenance/{entry_id}")
+def update_maintenance(entry_id: int, body: MaintenancePatch, request: Request):
+    current_user(request)
+    with db() as c:
+        return edit_maintenance(c, entry_id, body)
+
+
+@app.delete("/api/maintenance/{entry_id}")
+def delete_maintenance(entry_id: int, request: Request):
+    current_user(request)
+    with db() as c:
+        return delete_maintenance_entry(c, entry_id)
 
 
 # ---------------------------------------------------------------- due list
@@ -2898,6 +3099,32 @@ def song_options(request: Request):
     return {"tunings": TUNING_SUGGESTIONS}
 
 
+# ---------------------------------------------------------------- backup / export
+
+
+@app.get("/api/export")
+def export_data(request: Request):
+    """The whole collection as one JSON download. Photo files stay in the data folder;
+    the export carries their stored names and urls."""
+    current_user(request)
+    with db() as c:
+        payload = {
+            "app": "Gearsmith",
+            "version": APP_VERSION,
+            "exported_at": now_iso(),
+            "gear": [gear_dict(c, r) for r in c.execute("SELECT * FROM gear ORDER BY id")],
+            "restrings": [restring_dict(c, r) for r in c.execute("SELECT * FROM restrings ORDER BY id")],
+            "maintenance": [maintenance_dict(c, r) for r in c.execute("SELECT * FROM maintenance ORDER BY id")],
+            "sets": [set_dict(c, r) for r in c.execute("SELECT * FROM sets ORDER BY id")],
+            "songs": [song_dict(c, r) for r in c.execute("SELECT * FROM songs ORDER BY id")],
+            "presets": [preset_dict(c, r) for r in c.execute("SELECT * FROM presets ORDER BY id")],
+        }
+    return JSONResponse(
+        payload,
+        headers={"Content-Disposition": f'attachment; filename="gearsmith-export-{today().isoformat()}.json"'},
+    )
+
+
 # ---------------------------------------------------------------- settings
 
 SETTINGS_DEFAULTS = {
@@ -2925,6 +3152,7 @@ class SettingsIn(BaseModel):
     feature_songs: bool | None = None
     feature_want: bool | None = None
     feature_sold: bool | None = None
+    feature_tuner: bool | None = None
 
 
 @app.get("/api/settings")
@@ -3138,6 +3366,36 @@ def v1_log_restring(gear_id: int, body: RestringIn, request: Request):
         rid = log_restring(c, gear_id, body, user["id"], via="api")
         row = c.execute("SELECT * FROM restrings WHERE id=?", (rid,)).fetchone()
         return restring_dict(c, row)
+
+
+@app.get("/api/v1/gear/{gear_id}/maintenance", tags=["v1"], summary="List an item's maintenance log")
+def v1_list_maintenance(gear_id: int, request: Request):
+    token_auth(request)
+    with db() as c:
+        return maintenance_list(c, gear_id)
+
+
+@app.post("/api/v1/gear/{gear_id}/maintenance", tags=["v1"], status_code=201,
+          summary="Log maintenance for an item (setup, tubes, fret work, repair, other)")
+def v1_add_maintenance(gear_id: int, body: MaintenanceIn, request: Request):
+    _, user = token_auth(request)
+    with db() as c:
+        entry_id = log_maintenance(c, gear_id, body, user["id"])
+        return maintenance_dict(c, get_maintenance_row(c, entry_id))
+
+
+@app.patch("/api/v1/maintenance/{entry_id}", tags=["v1"], summary="Edit a maintenance entry")
+def v1_edit_maintenance(entry_id: int, body: MaintenancePatch, request: Request):
+    token_auth(request)
+    with db() as c:
+        return edit_maintenance(c, entry_id, body)
+
+
+@app.delete("/api/v1/maintenance/{entry_id}", tags=["v1"], summary="Delete a maintenance entry")
+def v1_delete_maintenance(entry_id: int, request: Request):
+    token_auth(request)
+    with db() as c:
+        return delete_maintenance_entry(c, entry_id)
 
 
 @app.get("/api/v1/due", tags=["v1"], summary="Guitars whose strings are overdue or due within N days")

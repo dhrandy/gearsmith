@@ -1532,19 +1532,27 @@ async function setlistDetailView(id) {
   }
   let entries = l.songs;
 
-  async function save(next) {
+  // Saves run one at a time, in click order, so a quick move-then-remove
+  // can never land on the server out of order.
+  let saving = Promise.resolve();
+  let saveSeq = 0;
+  function save(next) {
     entries = next;
     if (entries.every((e) => e.song)) render();
-    try {
-      const saved = await api(`/api/setlists/${id}`, {
-        method: "PATCH",
-        body: { songs: entries.map((e) => ({ song_id: e.song_id, note: e.note })) },
-      });
-      entries = saved.songs;
-      render();
-    } catch (ex) {
-      toast(ex.message);
-    }
+    const seq = ++saveSeq;
+    const body = { songs: entries.map((e) => ({ song_id: e.song_id, note: e.note })) };
+    saving = saving.then(async () => {
+      try {
+        const saved = await api(`/api/setlists/${id}`, { method: "PATCH", body });
+        if (seq === saveSeq) {
+          entries = saved.songs;
+          render();
+        }
+      } catch (ex) {
+        toast(ex.message);
+      }
+    });
+    return saving;
   }
 
   function render() {

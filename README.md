@@ -13,6 +13,7 @@
   - Picks: thickness, material, how many you've got
   - Photos on everything, purchase date and price, notes
 - **Restring tracking** - log a restring (brand, gauge, date) and each guitar gets a "strings: N days" chip that turns yellow as the interval nears and red when it's overdue. Every guitar has its own restring interval.
+- **Favorites** - tap the star on any card or on the gear page to mark a favorite. Favorites sit at the top of their section, and the "Favorites only" button on the Gear page hides everything else (it remembers your choice on that device).
 - **Sets** - group gear into rigs: a pedalboard, a gig rig, a recording chain. Gear can live in several sets or none.
 - **Notifications** - Apprise alerts (ntfy, Pushover, Telegram, and 100+ others) when a guitar's strings pass their interval, with quiet hours and overdue repeats.
 - **Hideable sections** - don't have pedals? Turn the section off in Settings > Features and it leaves the interface. Hidden sections keep their data.
@@ -83,11 +84,13 @@ You can manage my guitar gear through the Gearsmith API at https://YOUR-URL-HERE
 Authenticate every request with the header: Authorization: Bearer YOUR-TOKEN-HERE
 The interactive docs are at /api/docs and the OpenAPI spec at /api/v1/openapi.json.
 You can: list and add gear (GET/POST /api/v1/gear), read one item (GET /api/v1/gear/{id}),
-update it (PATCH /api/v1/gear/{id}), log a restring (POST /api/v1/gear/{id}/restrings with
-brand, gauge and optional date), check what's due (GET /api/v1/due), and manage sets
-(GET/POST /api/v1/sets). Photos: attach one (POST /api/v1/gear/{id}/photos, multipart
-field "photo"), delete one (DELETE /api/v1/photos/{photo_id}), or make one the cover
-(POST /api/v1/photos/{photo_id}/cover); photo ids are in the item's photos list.
+update it (PATCH /api/v1/gear/{id}), star or unstar it as a favorite (PATCH with
+{"favorite": true} or false; every item carries a "favorite" flag and favorites list first),
+log a restring (POST /api/v1/gear/{id}/restrings with brand, gauge and optional date),
+check what's due (GET /api/v1/due), and manage sets (GET/POST /api/v1/sets).
+Photos: attach one (POST /api/v1/gear/{id}/photos, multipart field "photo"), delete one
+(DELETE /api/v1/photos/{photo_id}), or make one the cover (POST /api/v1/photos/{photo_id}/cover);
+photo ids are in the item's photos list.
 When I tell you I restrung a guitar, log it. When I ask what needs new strings, check the
 due list.
 ```

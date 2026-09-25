@@ -2592,6 +2592,16 @@ async function settingsView() {
       </form>
     </div>` : ""}
     <div class="card settings-section stack">
+      <h2 style="margin-top:0">Change password</h2>
+      <p class="hint">Enter your current password to change it. Other signed-in devices will need to sign in again.</p>
+      <form id="change-password" class="form-grid password-form">
+        <div class="full"><label for="pw-current">Current password</label><input id="pw-current" type="password" required maxlength="200" autocomplete="current-password" /></div>
+        <div><label for="pw-new">New password</label><input id="pw-new" type="password" required minlength="8" maxlength="200" autocomplete="new-password" /></div>
+        <div><label for="pw-confirm">Confirm new password</label><input id="pw-confirm" type="password" required minlength="8" maxlength="200" autocomplete="new-password" /></div>
+        <div class="full"><p class="error" id="pw-error" role="alert" aria-live="polite"></p><button class="small primary" type="submit">Change password</button></div>
+      </form>
+    </div>
+    <div class="card settings-section stack">
       <h2 style="margin-top:0">API tokens</h2>
       <p class="hint">Tokens act as you over the <a href="/api/docs" target="_blank" rel="noopener">token API</a>. Treat them like passwords; anyone with a token can read and change your gear.</p>
       <div id="token-list" class="stack">
@@ -2686,6 +2696,34 @@ async function settingsView() {
       } catch (ex) { toast(ex.message); }
     });
   }
+
+  document.getElementById("change-password").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const form = e.currentTarget;
+    const error = document.getElementById("pw-error");
+    const button = form.querySelector("button[type=submit]");
+    error.textContent = "";
+    const current = document.getElementById("pw-current").value;
+    const next = document.getElementById("pw-new").value;
+    const confirm = document.getElementById("pw-confirm").value;
+    if (next !== confirm) {
+      error.textContent = "New passwords do not match";
+      return;
+    }
+    button.disabled = true;
+    try {
+      await api("/api/me/password", {
+        method: "POST",
+        body: { current_password: current, new_password: next, confirm_password: confirm },
+      });
+      form.reset();
+      toast("Password changed");
+    } catch (ex) {
+      error.textContent = ex.message;
+    } finally {
+      button.disabled = false;
+    }
+  });
 
   // The new token lives in state.newToken, so it survives every re-render of this view
   // (list refresh, revoking another token) until the user taps Done or leaves Settings.

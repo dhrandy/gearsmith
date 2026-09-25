@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.5.3"
+APP_VERSION = "0.5.4"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -852,6 +852,33 @@ def logout(request: Request, response: Response):
 @app.get("/api/me")
 def me(request: Request):
     return public_user(current_user(request))
+
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(max_length=200)
+    new_password: str = Field(max_length=200)
+    confirm_password: str = Field(max_length=200)
+
+
+@app.post("/api/me/password")
+def change_password(body: PasswordChange, request: Request):
+    user = current_user(request)
+    if not verify_password(body.current_password, user["password_hash"], user["salt"]):
+        raise HTTPException(400, "Current password is incorrect")
+    if body.new_password != body.confirm_password:
+        raise HTTPException(400, "New passwords do not match")
+    if body.new_password == body.current_password:
+        raise HTTPException(400, "Choose a different password")
+    password_hash, salt = password_record(body.new_password)
+    session_hash = hashlib.sha256(request.cookies[COOKIE].encode()).hexdigest()
+    with db() as c:
+        # Recheck within the transaction in case an administrator reset the password.
+        stored = c.execute("SELECT password_hash, salt FROM users WHERE id=?", (user["id"],)).fetchone()
+        if not stored or not verify_password(body.current_password, stored["password_hash"], stored["salt"]):
+            raise HTTPException(400, "Current password is incorrect")
+        c.execute("UPDATE users SET password_hash=?, salt=? WHERE id=?", (password_hash, salt, user["id"]))
+        c.execute("DELETE FROM sessions WHERE user_id=? AND token_hash<>?", (user["id"], session_hash))
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------- optional features

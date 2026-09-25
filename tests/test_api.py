@@ -1420,3 +1420,31 @@ def test_global_search(tmp_path):
         # blank and wildcard-only queries stay literal: no results, no error
         assert c.get("/api/search", params={"q": "  "}).json()["gear"] == []
         assert c.get("/api/search", params={"q": "100%"}).json()["gear"] == []
+
+
+def test_change_password_self_service(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as admin:
+        setup_admin(admin)
+        member = admin.post("/api/users", json={"username": "member", "password": "old-pass-123"}).json()
+        with TestClient(main.app) as other_device, TestClient(main.app) as member_client:
+            assert member_client.post("/api/login", json={"username": "member", "password": "old-pass-123"}).status_code == 200
+            assert other_device.post("/api/login", json={"username": "member", "password": "old-pass-123"}).status_code == 200
+            url = "/api/me/password"
+            body = {"current_password": "old-pass-123", "new_password": "new-pass-456", "confirm_password": "new-pass-456"}
+            assert member_client.post(url, json={**body, "current_password": "wrong-pass"}).json()["detail"] == "Current password is incorrect"
+            assert member_client.post(url, json={**body, "confirm_password": "not-the-same"}).json()["detail"] == "New passwords do not match"
+            assert member_client.post(url, json={**body, "new_password": "short", "confirm_password": "short"}).json()["detail"] == "Password must be at least 8 characters"
+            assert member_client.post(url, json={**body, "new_password": "old-pass-123", "confirm_password": "old-pass-123"}).json()["detail"] == "Choose a different password"
+            assert member_client.post(url, json=body).json() == {"ok": True}
+            assert member_client.get("/api/me").json()["id"] == member["id"]
+            assert other_device.get("/api/me").status_code == 401
+            assert admin.get("/api/me").status_code == 200
+            with main.db() as db:
+                row = db.execute("SELECT password_hash, salt FROM users WHERE id=?", (member["id"],)).fetchone()
+                assert row["password_hash"] != body["new_password"]
+                assert main.verify_password(body["new_password"], row["password_hash"], row["salt"])
+            assert member_client.post("/api/logout").status_code == 200
+            assert member_client.post("/api/login", json={"username": "member", "password": "old-pass-123"}).status_code == 401
+            assert member_client.post("/api/login", json={"username": "member", "password": "new-pass-456"}).status_code == 200
+            assert TestClient(main.app).post(url, json=body).status_code == 401

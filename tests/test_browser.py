@@ -1223,3 +1223,31 @@ def test_control_defaults_prefill_song_rigs(app_url, width, height):
         controls = req.get(app_url + f"/api/gear/{drive}").json()["controls"]
         assert [c.get("value") for c in controls] == ["2:00", "noon", None]
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1440, 900), (390, 844), (280, 653)])
+def test_change_password_settings(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        page.goto(app_url + "/#/settings")
+        form = page.locator("#change-password")
+        expect(page.get_by_role("heading", name="Change password")).to_be_visible()
+        form.locator("#pw-current").fill("wrong-pass")
+        form.locator("#pw-new").fill("new-pass-456")
+        form.locator("#pw-confirm").fill("new-pass-456")
+        form.get_by_role("button", name="Change password").click()
+        expect(form.get_by_role("alert")).to_have_text("Current password is incorrect")
+        form.locator("#pw-current").fill("password-123")
+        form.locator("#pw-confirm").fill("another-pass")
+        form.get_by_role("button", name="Change password").click()
+        expect(form.get_by_role("alert")).to_have_text("New passwords do not match")
+        form.locator("#pw-confirm").fill("new-pass-456")
+        form.get_by_role("button", name="Change password").click()
+        expect(page.locator("#toast")).to_have_text("Password changed")
+        expect(form.locator("#pw-current")).to_have_value("")
+        assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+        page.reload()
+        expect(page.get_by_role("heading", name="Change password")).to_be_visible()
+        browser.close()

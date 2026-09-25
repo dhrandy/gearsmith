@@ -36,7 +36,7 @@
 - **Search everything** - the search box in the top bar (on every page) matches gear, songs, artists, presets, sets and setlists at once, and every result is a link to its page. The Gear page keeps its own filter for names, makes, models and spec values like a gauge, plus a string-type filter for the Strings section. The API takes the same search as `?q=` on each list, and `GET /api/search?q=` runs the global one.
 - **Hideable sections** - don't have pedals? Don't care about songs or a wish list? Turn the section off in Settings > Features and it leaves the interface. Hidden sections keep their data.
 - **Install it like an app** - add Gearsmith to your phone's home screen (Share > Add to Home Screen on iPhone, Install app on Android) and it opens in its own window without the browser bar, with a proper icon on both. Long-press the icon on Android for shortcuts to Gear, Setlists and the Tuner. There's no offline mode on purpose: your data lives on your server, and caching pages on the phone would risk showing stale gear after an update.
-- **Multi-user** - admin plus member accounts, everyone with their own login.
+- **Multi-user** - admin plus member accounts, everyone with their own login. Each signed-in user can change their own password in Settings > Change password. The current password is required; other signed-in devices are signed out after a change. Administrators can still reset another user's password from Settings > Users. Passwords use salted PBKDF2-HMAC-SHA256, not plain text.
 - **Token API** - per-user API tokens and interactive docs at `/api/docs`, so you can log a restring or read your collection from anywhere: a script, a shortcut, or an AI assistant.
 
 ## Run it

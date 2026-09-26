@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -811,12 +811,24 @@ class Credentials(BaseModel):
     password: str = Field(max_length=200)
 
 
+class LoginCredentials(BaseModel):
+    username: str | None = Field(default=None, max_length=40)
+    password: str | None = Field(default=None, max_length=200)
+    token: str | None = None
+
+
 @app.get("/api/status")
 def status():
     with db() as c:
         setup_required = c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
         name = get_setting(c, "app_name", "Gearsmith")
-    return {"setup_required": setup_required, "app_name": name, "version": APP_VERSION}
+        token_login_enabled = get_setting(c, "feature_token_login", "1") == "1"
+    return {
+        "setup_required": setup_required,
+        "app_name": name,
+        "version": APP_VERSION,
+        "token_login_enabled": token_login_enabled,
+    }
 
 
 @app.post("/api/setup")
@@ -835,21 +847,49 @@ def setup(body: Credentials, response: Response):
     return {"ok": True}
 
 
+def token_login_user(token: str) -> sqlite3.Row | None:
+    """Find an active token owner without comparing a secret in SQL."""
+    digest = hashlib.sha256(token.encode()).hexdigest()
+    with db() as c:
+        candidates = c.execute(
+            "SELECT token_hash, created_by FROM api_tokens WHERE prefix=? AND revoked=0",
+            (token[:8],),
+        ).fetchall()
+        owner_id = None
+        for candidate in candidates:
+            # Compare fixed-length digests even when prefixes collide. The raw token
+            # is never persisted or included in an error or URL.
+            if hmac.compare_digest(digest, candidate["token_hash"]):
+                owner_id = candidate["created_by"]
+        if owner_id is None:
+            return None
+        return c.execute("SELECT * FROM users WHERE id=? AND active=1", (owner_id,)).fetchone()
+
+
 @app.post("/api/login")
-def login(body: Credentials, request: Request, response: Response):
+def login(body: LoginCredentials, request: Request, response: Response):
     ip = client_ip(request)
     retry = login_retry_after(ip)
     if retry:
         raise HTTPException(
             429, "Too many login attempts. Try again later.", headers={"Retry-After": str(retry)}
         )
-    with db() as c:
-        row = c.execute(
-            "SELECT * FROM users WHERE username=? COLLATE NOCASE", (body.username.strip(),)
-        ).fetchone()
-    if not row or not row["active"] or not verify_password(body.password, row["password_hash"], row["salt"]):
+    if body.token is not None and body.username is None and body.password is None:
+        with db() as c:
+            enabled = get_setting(c, "feature_token_login", "1") == "1"
+        row = token_login_user(body.token) if enabled and 1 <= len(body.token) <= 200 else None
+    elif body.token is None and body.username is not None and body.password is not None:
+        with db() as c:
+            row = c.execute(
+                "SELECT * FROM users WHERE username=? COLLATE NOCASE", (body.username.strip(),)
+            ).fetchone()
+        if not row or not row["active"] or not verify_password(body.password, row["password_hash"], row["salt"]):
+            row = None
+    else:
+        row = None
+    if row is None:
         record_login_failure(ip)
-        raise HTTPException(401, "Invalid username or password")
+        raise HTTPException(401, "Invalid sign-in credentials")
     clear_login_failures(ip)
     set_session(response, row["id"])
     return {"user": public_user(row)}
@@ -3571,13 +3611,14 @@ def export_data(request: Request):
 
 SETTINGS_DEFAULTS = {
     "app_name": "Gearsmith",
+    "feature_token_login": "1",
     **{f"feature_{name}": "1" for name in FEATURES},
 }
 
 
 def read_settings(c) -> dict[str, Any]:
     out = {k: get_setting(c, k, v) for k, v in SETTINGS_DEFAULTS.items()}
-    for name in FEATURES:
+    for name in (*FEATURES, "token_login"):
         out[f"feature_{name}"] = out[f"feature_{name}"] == "1"
     return out
 
@@ -3597,6 +3638,7 @@ class SettingsIn(BaseModel):
     feature_tuner: bool | None = None
     feature_values: bool | None = None
     feature_setting_photos: bool | None = None
+    feature_token_login: bool | None = None
 
 
 @app.get("/api/settings")
@@ -3614,7 +3656,7 @@ def update_settings(body: SettingsIn, request: Request):
             if not body.app_name.strip():
                 raise HTTPException(400, "Name is required")
             set_setting(c, "app_name", body.app_name.strip())
-        for name in FEATURES:
+        for name in (*FEATURES, "token_login"):
             value = getattr(body, f"feature_{name}")
             if value is not None:
                 set_setting(c, f"feature_{name}", "1" if value else "0")

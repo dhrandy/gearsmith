@@ -146,24 +146,49 @@ function authView() {
       <div class="card stack">
         <h1 style="margin-top:0">${setup ? "Set up " + esc(state.appName) : "Sign in"}</h1>
         ${setup ? `<p class="muted">Create the administrator account to get started.</p>` : ""}
+        ${!setup && state.tokenLoginEnabled ? `<div class="auth-choice" role="group" aria-label="Sign-in method">
+          <button type="button" id="auth-password-mode" aria-pressed="true">Password</button>
+          <button type="button" id="auth-token-mode" aria-pressed="false">API token</button>
+        </div>` : ""}
         <form id="auth-form" class="stack">
-          <div><label for="username">Username</label><input id="username" name="username" autocomplete="username" required /></div>
-          <div><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="${setup ? "new-password" : "current-password"}" required /></div>
+          <div id="username-field"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required /></div>
+          <div id="password-field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="${setup ? "new-password" : "current-password"}" required /></div>
+          ${!setup && state.tokenLoginEnabled ? `<div id="token-field" hidden><label for="token">API token</label><input id="token" name="token" type="password" autocomplete="off" maxlength="200" /></div>` : ""}
           <p class="error" id="auth-error"></p>
           <button class="primary" type="submit">${setup ? "Create administrator" : "Sign in"}</button>
         </form>
       </div>
     </div>`;
+  let tokenMode = false;
+  if (!setup && state.tokenLoginEnabled) {
+    for (const mode of ["password", "token"]) {
+      document.getElementById(`auth-${mode}-mode`).addEventListener("click", () => {
+        tokenMode = mode === "token";
+        document.getElementById("username-field").hidden = tokenMode;
+        document.getElementById("password-field").hidden = tokenMode;
+        document.getElementById("token-field").hidden = !tokenMode;
+        document.getElementById("username").required = !tokenMode;
+        document.getElementById("password").required = !tokenMode;
+        document.getElementById("token").required = tokenMode;
+        document.getElementById("password").value = "";
+        document.getElementById("token").value = "";
+        document.getElementById("auth-password-mode").setAttribute("aria-pressed", String(!tokenMode));
+        document.getElementById("auth-token-mode").setAttribute("aria-pressed", String(tokenMode));
+        document.getElementById("auth-error").textContent = "";
+      });
+    }
+  }
   document.getElementById("auth-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const err = document.getElementById("auth-error");
     err.textContent = "";
-    const body = {
+    const body = tokenMode ? { token: document.getElementById("token").value } : {
       username: document.getElementById("username").value,
       password: document.getElementById("password").value,
     };
     try {
       await api(setup ? "/api/setup" : "/api/login", { method: "POST", body });
+      if (tokenMode) document.getElementById("token").value = "";
       await boot(true);
     } catch (ex) {
       err.textContent = ex.message;
@@ -2624,6 +2649,7 @@ async function settingsView() {
         ["feature_sold", "Sold archive"], ["feature_tuner", "Tuner (uses the mic, runs on your device)"],
         ["feature_values", "Collection value (prices paid, current values and totals)"],
         ["feature_setting_photos", "Photos on presets and song rig settings"],
+        ["feature_token_login", "Sign in with an API token"],
       ].map(([key, label]) => `
         <label class="toggle"><input type="checkbox" data-feature="${key}" ${settings[key] ? "checked" : ""} ${isAdmin ? "" : "disabled"} /> ${label}</label>`).join("")}
     </div>
@@ -2729,6 +2755,7 @@ async function settingsView() {
     });
     view.querySelectorAll("[data-feature]").forEach((box) => box.addEventListener("change", async () => {
       state.settings = await api("/api/settings", { method: "PUT", body: { [box.dataset.feature]: box.checked } });
+      if (box.dataset.feature === "feature_token_login") state.tokenLoginEnabled = box.checked;
       const values = box.dataset.feature === "feature_values";
       toast(box.checked ? (values ? "Values shown" : "Section shown") : (values ? "Values hidden" : "Section hidden"));
       route();
@@ -3207,6 +3234,7 @@ async function boot(skipStatus = false) {
     state.setupRequired = st.setup_required;
     state.appName = st.app_name || "Gearsmith";
     state.version = st.version || "";
+    state.tokenLoginEnabled = st.token_login_enabled;
   }
   document.getElementById("app-name").textContent = state.appName;
   try {

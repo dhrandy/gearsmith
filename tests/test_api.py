@@ -1506,3 +1506,52 @@ def test_setting_photo_migration_keeps_existing_data(tmp_path):
         main.init_db()  # startup again on the same database, as on a container upgrade
         assert c.get(f"/api/presets/{preset['id']}").json()["photos"] == [photo]
         assert c.get(photo["url"]).status_code == 200
+
+
+def test_token_sign_in_uses_owner_session_and_shared_login_limit(tmp_path, monkeypatch):
+    fresh(tmp_path)
+    with TestClient(main.app) as admin, TestClient(main.app) as visitor:
+        setup_admin(admin)
+        token = admin.post('/api/tokens', json={'name': 'browser'}).json()['token']
+        token_id = admin.get('/api/tokens').json()[0]['id']
+        assert visitor.get('/api/me').status_code == 401
+        assert visitor.post('/api/login', json={'token': token + 'x'}).status_code == 401
+        assert visitor.post('/api/login', json={'token': token}).status_code == 200
+        assert visitor.get('/api/me').json()['username'] == 'admin-test'
+        assert main.COOKIE in visitor.cookies
+        visitor.post('/api/logout')
+        assert visitor.get('/api/me').status_code == 401
+
+        # A token cannot be squeezed through the password field or used with
+        # another username. No secret should appear in an error response.
+        for body in ({'username': 'admin-test', 'password': token},
+                     {'username': 'admin-test', 'token': token}):
+            response = visitor.post('/api/login', json=body)
+            assert response.status_code == 401
+            assert token not in response.text
+        assert visitor.post('/api/login', json={'token': token}).status_code == 200
+        visitor.post('/api/logout')
+
+        # Both types of bad login use the same five-failure IP window.
+        main._login_failures.clear()
+        for i in range(5):
+            body = {'token': f'gs_wrong-{i}'} if i % 2 else {'username': 'nobody', 'password': 'wrong'}
+            assert visitor.post('/api/login', json=body).status_code == 401
+        locked = visitor.post('/api/login', json={'token': token})
+        assert locked.status_code == 429 and 'retry-after' in locked.headers
+        assert token not in locked.text
+        main._login_failures.clear()
+
+        # Disabling website token sign-in leaves password and bearer API access intact.
+        assert admin.put('/api/settings', json={'feature_token_login': False}).json()['feature_token_login'] is False
+        assert admin.get('/api/status').json()['token_login_enabled'] is False
+        assert visitor.post('/api/login', json={'token': token}).status_code == 401
+        assert visitor.post('/api/login', json={'username': 'admin-test', 'password': 'password-123'}).status_code == 200
+        assert visitor.get('/api/me').status_code == 200
+        assert visitor.get('/api/v1/gear', headers={'Authorization': f'Bearer {token}'}).status_code == 200
+        assert admin.put('/api/settings', json={'feature_token_login': True}).status_code == 200
+
+        assert admin.delete(f'/api/tokens/{token_id}').status_code == 200
+        assert visitor.post('/api/login', json={'token': token}).status_code == 401
+        assert visitor.get('/api/me').status_code == 200  # existing session unaffected
+        assert token not in visitor.post('/api/login', json={'token': token}).text

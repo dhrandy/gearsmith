@@ -213,6 +213,9 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent2); b
 .token-new { word-break: break-all; background: var(--bg); border: 1px dashed var(--accent); border-radius: 10px; padding: 10px; font-family: ui-monospace, monospace; font-size: 13px; }
 
 /* login */
+.auth-choice { display: flex; gap: 8px; }
+.auth-choice button { flex: 1; min-height: 44px; }
+.auth-choice button[aria-pressed="true"] { border-color: var(--accent); color: var(--text); }
 .auth { max-width: 380px; margin: 12vh auto 0; }
 .auth-logo { display: flex; align-items: center; gap: 10px; font-size: 24px; font-weight: 800; margin-bottom: 12px; }
 

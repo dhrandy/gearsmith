@@ -30,9 +30,17 @@
 
 ![Setting photo open in the full-size overlay](docs/screenshots/gearsmith-lightbox.jpg)
 
-**Mobile** - the collection, a preset, and the photo overlay on a phone.
+**Mobile collection** - the gear grid with string chips on a phone.
 
-<img src="docs/screenshots/gearsmith-mobile-gear.jpg" alt="Gear collection on a phone" width="380"> <img src="docs/screenshots/gearsmith-mobile-preset.jpg" alt="Preset with signal chain on a phone" width="380"> <img src="docs/screenshots/gearsmith-mobile-lightbox.jpg" alt="Photo overlay on a phone" width="380">
+<p align="center"><img src="docs/screenshots/gearsmith-mobile-gear.jpg" alt="Gear collection on a phone" width="380"></p>
+
+**Mobile preset** - the full signal chain with every setting on a phone.
+
+<p align="center"><img src="docs/screenshots/gearsmith-mobile-preset.jpg" alt="Preset with signal chain on a phone" width="380"></p>
+
+**Mobile photo overlay** - the full-size setting photo on a phone.
+
+<p align="center"><img src="docs/screenshots/gearsmith-mobile-lightbox.jpg" alt="Photo overlay on a phone" width="380"></p>
 
 ## What it does
 
@@ -206,3 +214,4 @@ Tests cover the API and the UI (Playwright) and run in CI before every image pub
 ## License
 
 MIT - see [LICENSE](LICENSE).
+

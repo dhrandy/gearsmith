@@ -992,6 +992,15 @@ def test_pedalboard_order_moves_and_drags(app_url, width, height):
         page.get_by_role("button", name="Move Demo Drive later").click()
         expect(pedals).to_have_text(["Demo Tuner", "Demo Delay", "Demo Drive", "Demo Reverb"])
 
+        # Wait for the arrow's save before dragging, so a slow server cannot
+        # leave a previous order in flight when the drag sends the next one.
+        page.wait_for_function("""async () => {
+          const id = location.hash.split('/').pop();
+          const response = await fetch(`/api/sets/${id}`);
+          const set = await response.json();
+          return set.items.filter(item => item.type === 'pedal').map(item => item.name).join(',') ===
+            'Demo Tuner,Demo Delay,Demo Drive,Demo Reverb';
+        }""")
         # drag by the handle: reverb onto the first pedal (wait out the save toast - it covers the handle)
         expect(page.locator("#toast")).to_be_hidden()
         grip = page.get_by_role("button", name="Drag Demo Reverb")

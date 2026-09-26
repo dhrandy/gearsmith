@@ -2391,17 +2391,23 @@ function mountBoard(box, s) {
   const amps = items.filter((i) => i.type === "amp");
   if (!items.some((i) => i.type === "pedal") && !(guitars.length && amps.length)) { box.innerHTML = ""; return; }
 
-  async function save(nextItems, message) {
+  // Keep quick arrow moves and a following drag in the same order on the server.
+  let saving = Promise.resolve();
+  function save(nextItems, message) {
     items = nextItems;
     render();
-    try {
-      await api(`/api/sets/${s.id}`, { method: "PATCH", body: { item_ids: items.map((i) => i.id) } });
-      s.items = items;
-      document.getElementById("sd-members").innerHTML = setMembersHtml(s);
-      if (message) toast(message);
-    } catch (ex) {
-      toast(ex.message);
-    }
+    const order = nextItems.map((item) => item.id);
+    saving = saving.then(async () => {
+      try {
+        await api(`/api/sets/${s.id}`, { method: "PATCH", body: { item_ids: order } });
+        s.items = nextItems;
+        document.getElementById("sd-members").innerHTML = setMembersHtml(s);
+        if (message) toast(message);
+      } catch (ex) {
+        toast(ex.message);
+      }
+    });
+    return saving;
   }
 
   function end(list, icon, label) {

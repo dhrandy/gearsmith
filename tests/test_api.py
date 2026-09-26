@@ -1492,3 +1492,17 @@ def test_setting_photos_on_presets_and_song_rig(tmp_path):
         rig_photo = c.post(rig_url, headers=h, files={"photo": ("board.jpg", photo, "image/jpeg")}).json()
         assert c.delete(f"/api/v1/songs/{sid}", headers=h).status_code == 200
         assert c.get(rig_photo["url"]).status_code == 404
+
+
+def test_setting_photo_migration_keeps_existing_data(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        preset = c.post("/api/presets", json={"name": "Existing tone"}).json()
+        photo = c.post(
+            f"/api/presets/{preset['id']}/photos",
+            files={"photo": ("board.png", PNG, "image/png")},
+        ).json()
+        main.init_db()  # startup again on the same database, as on a container upgrade
+        assert c.get(f"/api/presets/{preset['id']}").json()["photos"] == [photo]
+        assert c.get(photo["url"]).status_code == 200

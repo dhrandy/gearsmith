@@ -4,6 +4,36 @@
 
 ![MIT](https://img.shields.io/badge/license-MIT-green) ![status](https://img.shields.io/badge/status-beta-yellow)
 
+## Screenshots
+
+**Gear collection** - the whole stable at a glance, with string age chips on every guitar.
+
+![Gear grid with photos and string status chips](docs/screenshots/gearsmith-gear.jpg)
+
+**Gear detail** - specs, string status, and photos for one instrument.
+
+![Gear detail with specs and restring status](docs/screenshots/gearsmith-detail.jpg)
+
+**Sets and pedalboards** - a board's layout with chain order and total power draw.
+
+![Pedalboard layout with chain order and power total](docs/screenshots/gearsmith-set.jpg)
+
+**Preset** - a saved tone: the signal chain with every knob setting, plus setting photos of the real board.
+
+![Preset with signal chain and setting photo](docs/screenshots/gearsmith-preset.jpg)
+
+**Songs** - the recall sheet: tuning, capo, key, tempo, and the exact settings for each section.
+
+![Song page with preset settings recalled per section](docs/screenshots/gearsmith-song.jpg)
+
+**Photo overlay** - tap any setting photo for the full view; close with the X, the backdrop, or Esc.
+
+![Setting photo open in the full-size overlay](docs/screenshots/gearsmith-lightbox.jpg)
+
+**Mobile** - the collection and the photo overlay on a phone.
+
+<img src="docs/screenshots/gearsmith-mobile-gear.jpg" alt="Gear collection on a phone" width="380"> <img src="docs/screenshots/gearsmith-mobile-lightbox.jpg" alt="Photo overlay on a phone" width="380">
+
 ## What it does
 
 - **Gear inventory** - guitars, amps, pedals, picks, and strings, each with the spec fields that matter:

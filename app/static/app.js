@@ -1280,7 +1280,7 @@ function presetCard(p) {
   const chainText = chain.join(" › ");
   return `
       <a class="gear-card song-card preset-card" href="#/presets/${p.id}" title="${esc(p.name)}">
-        <span class="thumb">🎚️</span>
+        <span class="thumb">${featureOn("feature_setting_photos") && p.cover ? `<img src="${esc(p.cover.url)}" alt="Photo of ${esc(p.name)}" />` : "🎚️"}</span>
         <span class="gc-body">
           <span class="gc-name">${esc(title)}</span>
           ${p.artist ? `<span class="gc-meta">${esc(p.artist)}</span>` : ""}
@@ -1320,7 +1320,7 @@ function knobText(knobs) {
 const gearLink = (gid, name) => (gid ? `<a href="#/gear/${gid}">${esc(name)}</a>` : esc(name));
 const setLink = (sid, name) => (sid && featureOn("feature_sets") ? `<a href="#/sets/${sid}">${esc(name)}</a>` : esc(name));
 
-function chainHtml(rig) {
+function chainHtml(rig, songId = null) {
   return `<ol class="chain">
       ${rig.map((r) => `
         <li class="chain-item${r.engaged === "off" ? " off" : ""}">
@@ -1330,6 +1330,19 @@ function chainHtml(rig) {
           </div>
           ${r.knobs.length ? `<div class="knobs">${knobText(r.knobs)}</div>` : ""}
           ${r.note ? `<p class="notes muted">${esc(r.note)}</p>` : ""}
+          ${songId && featureOn("feature_setting_photos") ? `
+            <div class="setting-photos">
+              ${(r.photos || []).map((photo) => `<div class="setting-photo">
+                <a href="${esc(photo.url)}" target="_blank" rel="noopener" aria-label="Open photo of ${esc(r.gear_name)}">
+                  <img src="${esc(photo.url)}" alt="${esc(r.gear_name)} settings" />
+                </a>
+                <button class="small ghost danger" type="button" data-rig-photo-delete="${photo.id}" aria-label="Delete photo of ${esc(r.gear_name)}">Delete</button>
+              </div>`).join("")}
+            </div>
+            <form class="row setting-photo-form" data-rig-photo-upload="${r.id}">
+              <input type="file" accept="image/*" aria-label="Photo of ${esc(r.gear_name)}" required />
+              <button class="small" type="submit">Add photo</button>
+            </form>` : ""}
         </li>`).join("")}
     </ol>`;
 }
@@ -1423,6 +1436,19 @@ async function presetDetailView(id) {
     ${p.amp_name ? `<div class="facts recall-facts"><div class="fact"><span>Amp</span>${gearLink(p.amp_id, p.amp_name)}</div></div>` : ""}
     <h2>Signal chain</h2>
     ${p.rig.length ? chainHtml(p.rig) : `<p class="muted">No gear settings in this preset.</p>`}
+    ${featureOn("feature_setting_photos") ? `<h2>Setting photos</h2>
+      <div class="card">
+        <div class="setting-photos">${p.photos.map((photo) => `<div class="setting-photo">
+          <a href="${esc(photo.url)}" target="_blank" rel="noopener" aria-label="Open photo of ${esc(p.name)}">
+            <img src="${esc(photo.url)}" alt="${esc(p.name)} rig" />
+          </a>
+          <button class="small ghost danger" type="button" data-preset-photo-delete="${photo.id}" aria-label="Delete photo of ${esc(p.name)}">Delete</button>
+        </div>`).join("")}</div>
+        <form id="preset-photo-form" class="row setting-photo-form">
+          <input type="file" accept="image/*" aria-label="Preset photo" required />
+          <button class="small" type="submit">Add photo</button>
+        </form>
+      </div>` : ""}
     ${p.patches.length ? `<h2>Patches</h2>${patchesHtml(p.patches)}` : ""}
     ${p.notes ? `<h2>Notes</h2><p class="notes wrap-any">${esc(p.notes)}</p>` : ""}
     <h2>Used in</h2>
@@ -1430,6 +1456,21 @@ async function presetDetailView(id) {
       ? `<div class="set-chips">${p.songs.map((s) => `<a class="set-chip link-chip" href="#/songs/${s.id}" title="${esc(s.title)}">${esc(s.title)}${s.artist ? ` <span class="muted">${esc(s.artist)}</span>` : ""}</a>`).join("")}</div>
          <p class="hint">Changes to this preset show up in all of these songs.</p>`
       : `<span class="muted">No songs use this preset yet. Pick it in a song's editor.</span>`}</div>`;
+  const photoForm = document.getElementById("preset-photo-form");
+  if (photoForm) photoForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData();
+    data.append("photo", photoForm.querySelector('input[type="file"]').files[0]);
+    try {
+      await api(`/api/presets/${id}/photos`, { method: "POST", body: data });
+      toast("Photo added");
+      presetDetailView(id);
+    } catch (error) { toast(error.message); }
+  });
+  view.querySelectorAll("[data-preset-photo-delete]").forEach((button) => button.addEventListener("click", async () => {
+    await api(`/api/preset-photos/${button.dataset.presetPhotoDelete}`, { method: "DELETE" });
+    presetDetailView(id);
+  }));
   document.getElementById("pd-delete").addEventListener("click", () => {
     const used = p.songs.length ? ` ${p.songs.length === 1 ? "1 song uses" : p.songs.length + " songs use"} it and will lose these settings.` : "";
     openSheet(`
@@ -1712,7 +1753,7 @@ async function songDetailView(id) {
         </div>`).join("")}
     </div>` : ""}
     ${s.rig.length || !s.presets.length ? `<h2>${s.presets.length ? "Song's own settings" : "Signal chain"}</h2>` : ""}
-    ${s.rig.length ? chainHtml(s.rig) : (s.presets.length ? "" : `<p class="muted">No gear settings saved for this song.</p>`)}
+    ${s.rig.length ? chainHtml(s.rig, s.id) : (s.presets.length ? "" : `<p class="muted">No gear settings saved for this song.</p>`)}
     ${s.patches.length ? `<h2>Patches</h2>${patchesHtml(s.patches)}` : ""}
     ${s.notes ? `<h2>Notes</h2><p class="notes wrap-any">${esc(s.notes)}</p>` : ""}
     <h2>Photos</h2>
@@ -1792,6 +1833,20 @@ async function songDetailView(id) {
       toast("Copied into the song");
       songDetailView(id);
     });
+  }));
+  view.querySelectorAll("[data-rig-photo-upload]").forEach((form) => form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData();
+    data.append("photo", form.querySelector('input[type="file"]').files[0]);
+    try {
+      await api(`/api/songs/${id}/rig/${form.dataset.rigPhotoUpload}/photos`, { method: "POST", body: data });
+      toast("Photo added");
+      songDetailView(id);
+    } catch (error) { toast(error.message); }
+  }));
+  view.querySelectorAll("[data-rig-photo-delete]").forEach((button) => button.addEventListener("click", async () => {
+    await api(`/api/rig-photos/${button.dataset.rigPhotoDelete}`, { method: "DELETE" });
+    songDetailView(id);
   }));
   document.getElementById("song-photo-form").addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -2562,6 +2617,7 @@ async function settingsView() {
         ["feature_songs", "Songs (rig and tone settings per song)"], ["feature_want", "Want list"],
         ["feature_sold", "Sold archive"], ["feature_tuner", "Tuner (uses the mic, runs on your device)"],
         ["feature_values", "Collection value (prices paid, current values and totals)"],
+        ["feature_setting_photos", "Photos on presets and song rig settings"],
       ].map(([key, label]) => `
         <label class="toggle"><input type="checkbox" data-feature="${key}" ${settings[key] ? "checked" : ""} ${isAdmin ? "" : "disabled"} /> ${label}</label>`).join("")}
     </div>

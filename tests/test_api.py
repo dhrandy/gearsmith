@@ -1448,3 +1448,47 @@ def test_change_password_self_service(tmp_path):
             assert member_client.post("/api/login", json={"username": "member", "password": "old-pass-123"}).status_code == 401
             assert member_client.post("/api/login", json={"username": "member", "password": "new-pass-456"}).status_code == 200
             assert TestClient(main.app).post(url, json=body).status_code == 401
+
+
+def test_setting_photos_on_presets_and_song_rig(tmp_path):
+    fresh(tmp_path)
+    photo = b"\xff\xd8\xff" + b"rig photo test" * 100
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        token = c.post("/api/tokens", json={"name": "photos"}).json()["token"]
+        h = {"Authorization": f"Bearer {token}"}
+        preset = c.post("/api/v1/presets", headers=h, json={"name": "Compact board", "artist": "Example band"}).json()
+        pid = preset["id"]
+        endpoint = f"/api/v1/presets/{pid}/photos"
+        assert c.post(endpoint, files={"photo": ("board.jpg", photo, "image/jpeg")}).status_code == 401
+        assert c.post("/api/v1/presets/9999/photos", headers=h, files={"photo": ("board.jpg", photo, "image/jpeg")}).status_code == 404
+        assert c.post(endpoint, headers=h, files={"photo": ("not.jpg", b"invalid", "image/jpeg")}).status_code == 400
+        uploaded = c.post(endpoint, headers=h, files={"photo": ("board.jpg", photo, "image/jpeg")})
+        assert uploaded.status_code == 201
+        preset_photo = uploaded.json()
+        assert (main.PHOTOS_DIR / preset_photo["url"].split("/")[-1]).read_bytes() == photo
+        assert c.get(preset_photo["url"]).content == photo
+        assert c.get(f"/api/v1/presets/{pid}", headers=h).json()["photos"] == [preset_photo]
+        assert c.get("/api/v1/artists", headers=h).json()[0]["presets"][0]["cover"]["url"] == preset_photo["url"]
+        assert "/api/v1/presets/{preset_id}/photos" in c.get("/api/v1/openapi.json").json()["paths"]
+        assert c.put("/api/settings", json={"feature_setting_photos": False}).json()["feature_setting_photos"] is False
+        assert c.get(f"/api/v1/presets/{pid}", headers=h).json()["photos"] == [preset_photo]
+
+        song = c.post("/api/songs", json={"title": "Example", "artist": "Example band", "rig": [{"gear_name": "Board"}]}).json()
+        sid, rid = song["id"], song["rig"][0]["id"]
+        rig_url = f"/api/v1/songs/{sid}/rig/{rid}/photos"
+        assert c.post(f"/api/v1/songs/{sid + 100}/rig/{rid}/photos", headers=h, files={"photo": ("board.jpg", photo, "image/jpeg")}).status_code == 404
+        rig_photo = c.post(rig_url, headers=h, files={"photo": ("board.jpg", photo, "image/jpeg")}).json()
+        assert c.get(f"/api/v1/songs/{sid}", headers=h).json()["rig"][0]["photos"] == [rig_photo]
+        assert c.delete(f"/api/v1/rig-photos/{rig_photo['id']}", headers=h).status_code == 200
+        assert c.get(rig_photo["url"]).status_code == 404
+        assert c.delete(f"/api/v1/preset-photos/{preset_photo['id']}", headers=h).status_code == 200
+        assert c.get(preset_photo["url"]).status_code == 404
+        assert list(main.PHOTOS_DIR.iterdir()) == []
+
+        again = c.post(endpoint, headers=h, files={"photo": ("board.jpg", photo, "image/jpeg")}).json()
+        assert c.delete(f"/api/v1/presets/{pid}", headers=h).status_code == 200
+        assert c.get(again["url"]).status_code == 404
+        rig_photo = c.post(rig_url, headers=h, files={"photo": ("board.jpg", photo, "image/jpeg")}).json()
+        assert c.delete(f"/api/v1/songs/{sid}", headers=h).status_code == 200
+        assert c.get(rig_photo["url"]).status_code == 404

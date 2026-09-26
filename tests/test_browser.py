@@ -1251,3 +1251,43 @@ def test_change_password_settings(app_url, width, height):
         page.reload()
         expect(page.get_by_role("heading", name="Change password")).to_be_visible()
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1440, 900), (390, 844)])
+def test_preset_photo_visible_from_artist_card_and_settings(app_url, width, height, tmp_path):
+    import base64
+
+    photo = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4"
+        "/5+hHgAHggJ/P4wW2QAAAABJRU5ErkJggg=="
+    )
+    with httpx.Client(base_url=app_url) as client:
+        assert client.post("/api/setup", json={"username": "admin-test", "password": "password-123"}).status_code == 200
+        preset = client.post("/api/presets", json={"name": "Example (Compact board)", "artist": "Example band"}).json()
+        response = client.post(
+            f"/api/presets/{preset['id']}/photos",
+            files={"photo": ("board.png", photo, "image/png")},
+        )
+        assert response.status_code == 201
+        photo_url = response.json()["url"]
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        page.goto(app_url + "/#/songs/artists")
+        card = page.locator(".artist-group .preset-card", has_text="Compact board")
+        thumbnail = card.locator(".thumb img")
+        expect(thumbnail).to_be_visible()
+        assert thumbnail.evaluate("img => img.naturalWidth > 0")
+        card.click()
+        image_link = page.locator(".setting-photo a")
+        expect(image_link).to_be_visible()
+        assert image_link.get_attribute("href") == photo_url
+        assert not page.evaluate("document.documentElement.scrollWidth > innerWidth")
+        page.goto(app_url + "/#/settings")
+        page.locator('[data-feature="feature_setting_photos"]').uncheck()
+        page.goto(app_url + "/#/songs/artists")
+        expect(page.locator(".artist-group .preset-card .thumb img")).to_have_count(0)
+        page.goto(app_url + f"/#/presets/{preset['id']}")
+        expect(page.locator(".setting-photo")).to_have_count(0)
+        browser.close()

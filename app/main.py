@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.5.4"
+APP_VERSION = "0.6.0"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -413,6 +413,22 @@ def init_db() -> None:
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS preset_photos (
+          id INTEGER PRIMARY KEY,
+          preset_id INTEGER NOT NULL REFERENCES presets(id) ON DELETE CASCADE,
+          filename TEXT NOT NULL,
+          sort INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_preset_photos ON preset_photos(preset_id, sort);
+        CREATE TABLE IF NOT EXISTS rig_photos (
+          id INTEGER PRIMARY KEY,
+          setting_id INTEGER NOT NULL REFERENCES song_gear_settings(id) ON DELETE CASCADE,
+          filename TEXT NOT NULL,
+          sort INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_rig_photos ON rig_photos(setting_id, sort);
         CREATE TABLE IF NOT EXISTS preset_gear_settings (
           id INTEGER PRIMARY KEY,
           preset_id INTEGER NOT NULL REFERENCES presets(id) ON DELETE CASCADE,
@@ -884,7 +900,7 @@ def change_password(body: PasswordChange, request: Request):
 # ---------------------------------------------------------------- optional features
 
 # Hideable sections: each gear type, sets, and the maintenance loop.
-FEATURES = ("guitars", "amps", "pedals", "picks", "strings", "sets", "maintenance", "songs", "want", "sold", "tuner", "values")
+FEATURES = ("guitars", "amps", "pedals", "picks", "strings", "sets", "maintenance", "songs", "want", "sold", "tuner", "values", "setting_photos")
 FEATURE_LABELS = {
     "guitars": "Guitars section",
     "amps": "Amps section",
@@ -2466,7 +2482,7 @@ def get_song_row(c, song_id: int):
     return row
 
 
-def rig_dict(row) -> dict[str, Any]:
+def rig_dict(row, c=None) -> dict[str, Any]:
     return {
         "id": row["id"],
         "gear_id": row["gear_id"],
@@ -2475,6 +2491,7 @@ def rig_dict(row) -> dict[str, Any]:
         "engaged": row["engaged"],
         "knobs": json.loads(row["knobs"] or "[]"),
         "note": row["note"],
+        "photos": owner_photo_list(c, "rig", row["id"]) if c else [],
     }
 
 
@@ -2507,6 +2524,63 @@ def patch_dict(c, row, o: Owner = SONG) -> dict[str, Any]:
         "note": row["note"],
         "blocks": [block_dict(b) for b in blocks],
     }
+
+
+PHOTO_OWNERS = {
+    "preset": ("preset_photos", "preset_id", "presets"),
+    "rig": ("rig_photos", "setting_id", "song_gear_settings"),
+}
+
+
+def owner_photo_list(c, kind: str, owner_id: int) -> list[dict[str, Any]]:
+    table, column, _ = PHOTO_OWNERS[kind]
+    rows = c.execute(
+        f"SELECT id, filename FROM {table} WHERE {column}=? ORDER BY sort, id", (owner_id,)
+    ).fetchall()
+    return [{"id": row["id"], "url": f"/api/photos/{row['filename']}"} for row in rows]
+
+
+def unlink_owner_photos(c, kind: str, owner_id: int) -> None:
+    for photo in owner_photo_list(c, kind, owner_id):
+        unlink_photo(photo["url"].rsplit("/", 1)[-1])
+
+
+async def attach_owner_photo(c, kind: str, owner_id: int, file: UploadFile) -> dict[str, Any]:
+    table, column, owner_table = PHOTO_OWNERS[kind]
+    if not c.execute(f"SELECT id FROM {owner_table} WHERE id=?", (owner_id,)).fetchone():
+        raise HTTPException(404, "Setting not found")
+    stored = await save_photo(file)
+    try:
+        sort = c.execute(f"SELECT COALESCE(MAX(sort), -1) + 1 FROM {table} WHERE {column}=?", (owner_id,)).fetchone()[0]
+        photo_id = c.execute(
+            f"INSERT INTO {table}({column},filename,sort,created_at) VALUES(?,?,?,?)",
+            (owner_id, stored, sort, now_iso()),
+        ).lastrowid
+    except Exception:
+        unlink_photo(stored)
+        raise
+    if kind == "preset":
+        c.execute("UPDATE presets SET updated_at=? WHERE id=?", (now_iso(), owner_id))
+    else:
+        row = c.execute("SELECT song_id FROM song_gear_settings WHERE id=?", (owner_id,)).fetchone()
+        touch_song(c, row["song_id"])
+    return {"id": photo_id, "url": f"/api/photos/{stored}"}
+
+
+def remove_owner_photo(c, kind: str, photo_id: int) -> dict[str, bool]:
+    table, column, _ = PHOTO_OWNERS[kind]
+    row = c.execute(f"SELECT * FROM {table} WHERE id=?", (photo_id,)).fetchone()
+    if not row:
+        raise HTTPException(404, "Photo not found")
+    c.execute(f"DELETE FROM {table} WHERE id=?", (photo_id,))
+    if kind == "preset":
+        c.execute("UPDATE presets SET updated_at=? WHERE id=?", (now_iso(), row[column]))
+    else:
+        song = c.execute("SELECT song_id FROM song_gear_settings WHERE id=?", (row[column],)).fetchone()
+        if song:
+            touch_song(c, song["song_id"])
+    unlink_photo(row["filename"])
+    return {"ok": True}
 
 
 def song_photo_list(c, song_id: int) -> list[dict[str, Any]]:
@@ -2554,7 +2628,7 @@ def chain_of(c, owner_id: int, o: Owner) -> tuple[list[dict[str, Any]], list[dic
     patches = c.execute(
         f"SELECT * FROM {o.patches} WHERE {o.col}=? ORDER BY position, id", (owner_id,)
     ).fetchall()
-    return [rig_dict(r) for r in rig], [patch_dict(c, p, o) for p in patches]
+    return [rig_dict(r, c if o == SONG else None) for r in rig], [patch_dict(c, p, o) for p in patches]
 
 
 def song_dict(c, row) -> dict[str, Any]:
@@ -2629,6 +2703,9 @@ def insert_patch(c, owner_id: int, item: PatchIn, position: int, o: Owner = SONG
 
 
 def replace_rig(c, owner_id: int, rig: list[RigSettingIn], o: Owner = SONG) -> None:
+    if o == SONG:
+        for row in c.execute("SELECT id FROM song_gear_settings WHERE song_id=?", (owner_id,)):
+            unlink_owner_photos(c, "rig", row["id"])
     c.execute(f"DELETE FROM {o.rig} WHERE {o.col}=?", (owner_id,))
     for pos, item in enumerate(rig):
         insert_rig_setting(c, owner_id, item, pos, o)
@@ -2725,6 +2802,8 @@ def remove_song(c, song_id: int) -> dict[str, Any]:
     get_song_row(c, song_id)
     for p in song_photo_list(c, song_id):
         unlink_photo(p["url"].rsplit("/", 1)[-1])
+    for row in c.execute("SELECT id FROM song_gear_settings WHERE song_id=?", (song_id,)):
+        unlink_owner_photos(c, "rig", row["id"])
     c.execute("DELETE FROM songs WHERE id=?", (song_id,))
     return {"ok": True}
 
@@ -2754,7 +2833,7 @@ def add_rig_setting(c, song_id: int, body: RigSettingIn) -> dict[str, Any]:
     ).fetchone()[0]
     sid = insert_rig_setting(c, song_id, body, top)
     touch_song(c, song_id)
-    return rig_dict(c.execute("SELECT * FROM song_gear_settings WHERE id=?", (sid,)).fetchone())
+    return rig_dict(c.execute("SELECT * FROM song_gear_settings WHERE id=?", (sid,)).fetchone(), c)
 
 
 def edit_rig_setting(c, song_id: int, setting_id: int, body: RigSettingPatch) -> dict[str, Any]:
@@ -2776,11 +2855,12 @@ def edit_rig_setting(c, song_id: int, setting_id: int, body: RigSettingPatch) ->
         sql = ", ".join(f"{k}=?" for k in cols)
         c.execute(f"UPDATE song_gear_settings SET {sql} WHERE id=?", (*cols.values(), setting_id))
         touch_song(c, song_id)
-    return rig_dict(c.execute("SELECT * FROM song_gear_settings WHERE id=?", (setting_id,)).fetchone())
+    return rig_dict(c.execute("SELECT * FROM song_gear_settings WHERE id=?", (setting_id,)).fetchone(), c)
 
 
 def delete_rig_setting(c, song_id: int, setting_id: int) -> dict[str, Any]:
     rig_row(c, song_id, setting_id)
+    unlink_owner_photos(c, "rig", setting_id)
     c.execute("DELETE FROM song_gear_settings WHERE id=?", (setting_id,))
     touch_song(c, song_id)
     return {"ok": True}
@@ -2890,6 +2970,7 @@ def preset_summary(c, row) -> dict[str, Any]:
         "amp_name": row["amp_name"],
         "notes": row["notes"],
         "song_count": preset_song_count(c, row["id"]),
+        "cover": (owner_photo_list(c, "preset", row["id"]) or [None])[0],
         "chain_summary": chain_summary(c, row["id"], PRESET),
         "added_by": display_user(c, row["created_by"]) or "System",
         "created_at": row["created_at"],
@@ -2927,6 +3008,7 @@ def chain_summary(c, owner_id: int, o: Owner) -> list[str]:
 def preset_dict(c, row, with_songs: bool = True) -> dict[str, Any]:
     out = preset_summary(c, row)
     out["rig"], out["patches"] = chain_of(c, row["id"], PRESET)
+    out["photos"] = owner_photo_list(c, "preset", row["id"])
     if with_songs:
         songs = c.execute(
             """SELECT DISTINCT s.* FROM songs s JOIN song_presets sp ON sp.song_id=s.id
@@ -3054,6 +3136,8 @@ def save_song_as_preset(c, song_row, body: SaveAsPresetIn, user_id: int | None) 
     ).lastrowid
     copy_chain(c, song_id, SONG, preset_id, PRESET)
     if body.use_in_song:
+        for row in c.execute("SELECT id FROM song_gear_settings WHERE song_id=?", (song_id,)):
+            unlink_owner_photos(c, "rig", row["id"])
         # the song now points at the preset instead of keeping its own copy
         c.execute("DELETE FROM song_gear_settings WHERE song_id=?", (song_id,))
         c.execute("DELETE FROM song_device_patches WHERE song_id=?", (song_id,))
@@ -3140,11 +3224,24 @@ def register_preset_routes(prefix: str, auth, v1: bool) -> None:
             update_preset(c, get_preset_row(c, preset_id), body)
             return preset_dict(c, get_preset_row(c, preset_id))
 
+    @route("post", "/presets/{preset_id}/photos", "Attach a photo to a preset (multipart field photo)", status_code=201)
+    async def _photo_add(preset_id: int, request: Request, photo: UploadFile = File(...)):
+        auth(request)
+        with db() as c:
+            return await attach_owner_photo(c, "preset", preset_id, photo)
+
+    @route("delete", "/preset-photos/{photo_id}", "Delete a preset photo")
+    def _photo_delete(photo_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            return remove_owner_photo(c, "preset", photo_id)
+
     @route("delete", "/presets/{preset_id}", "Delete a preset (songs using it just lose the link)")
     def _delete(preset_id: int, request: Request):
         auth(request)
         with db() as c:
             get_preset_row(c, preset_id)
+            unlink_owner_photos(c, "preset", preset_id)
             c.execute("DELETE FROM presets WHERE id=?", (preset_id,))
             return {"ok": True}
 
@@ -3235,6 +3332,20 @@ def register_song_routes(prefix: str, auth, v1: bool) -> None:
         auth(request)
         with db() as c:
             return delete_rig_setting(c, song_id, setting_id)
+
+    @route("post", "/songs/{song_id}/rig/{setting_id}/photos",
+           "Attach a photo to a song rig entry (multipart field photo)", status_code=201)
+    async def _rig_photo_add(song_id: int, setting_id: int, request: Request, photo: UploadFile = File(...)):
+        auth(request)
+        with db() as c:
+            rig_row(c, song_id, setting_id)
+            return await attach_owner_photo(c, "rig", setting_id, photo)
+
+    @route("delete", "/rig-photos/{photo_id}", "Delete a song rig entry photo")
+    def _rig_photo_delete(photo_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            return remove_owner_photo(c, "rig", photo_id)
 
     @route("post", "/songs/{song_id}/patches", "Add a modeler patch pointer to a song", status_code=201)
     def _patch_add(song_id: int, body: PatchIn, request: Request):
@@ -3485,6 +3596,7 @@ class SettingsIn(BaseModel):
     feature_sold: bool | None = None
     feature_tuner: bool | None = None
     feature_values: bool | None = None
+    feature_setting_photos: bool | None = None
 
 
 @app.get("/api/settings")

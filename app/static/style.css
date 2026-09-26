@@ -493,3 +493,16 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; min-hei
   .setlist-entry { grid-template-columns: minmax(0, 1fr); gap: 10px; padding: 12px; }
 }
 .sl-meta { margin: 6px 0 0; }
+
+/* Setting photos remain legible and tappable even in a narrow rig card. */
+.setting-photos { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+.setting-photo { width: min(180px, 100%); min-width: 0; }
+.setting-photo a { display: block; border-radius: 12px; overflow: hidden; background: var(--panel2); }
+.setting-photo img { display: block; width: 100%; aspect-ratio: 4 / 3; object-fit: cover; }
+.setting-photo button { margin-top: 6px; }
+.setting-photo-form { align-items: center; }
+.setting-photo-form input[type="file"] { min-width: 0; max-width: 100%; flex: 1 1 170px; }
+@media (max-width: 600px) {
+  .setting-photo { width: min(160px, 100%); }
+  .setting-photo-form button { min-height: 44px; }
+}

@@ -43,6 +43,10 @@
     </div>
     <main class="wrap" id="view" aria-live="polite"></main>
     <div class="modal" id="modal" hidden><div class="sheet" role="dialog" aria-modal="true" id="sheet"></div></div>
+    <div class="lightbox" id="lightbox" hidden role="dialog" aria-modal="true" aria-label="Photo viewer">
+      <button class="lightbox-close" type="button" aria-label="Close photo">&times;</button>
+      <img id="lightbox-img" alt="" />
+    </div>
     <div class="toast" id="toast" role="status" hidden></div>
     <script src="/static/qrcode.js"></script>
     <script src="/static/app.js"></script>

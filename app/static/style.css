@@ -232,6 +232,15 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent2); b
   background: #222c3a; border: 1px solid var(--line); border-radius: 12px; padding: 10px 16px; box-shadow: var(--shadow);
 }
 
+/* photo lightbox */
+.lightbox { position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, 0.88); display: grid; place-items: center; padding: 12px; }
+.lightbox img { max-width: 100%; max-height: calc(100vh - 24px); max-height: calc(100dvh - 24px); object-fit: contain; border-radius: 10px; box-shadow: var(--shadow); }
+.lightbox-close {
+  position: absolute; top: calc(10px + env(safe-area-inset-top)); right: calc(12px + env(safe-area-inset-right));
+  width: 44px; height: 44px; border: 1px solid var(--line); border-radius: 50%;
+  background: var(--panel); color: var(--text); font-size: 22px; line-height: 1; cursor: pointer;
+}
+
 /* strings stock */
 .badge.stock-low { color: var(--warn); }
 .badge.stock-out { color: var(--bad); }

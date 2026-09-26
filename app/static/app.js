@@ -6,6 +6,8 @@ const topbar = document.getElementById("top");
 const toastEl = document.getElementById("toast");
 const modalEl = document.getElementById("modal");
 const sheetEl = document.getElementById("sheet");
+const lightboxEl = document.getElementById("lightbox");
+const lightboxImg = document.getElementById("lightbox-img");
 
 const state = {
   me: null,
@@ -111,6 +113,29 @@ function closeSheet() {
   sheetEl.innerHTML = "";
 }
 modalEl.addEventListener("click", (e) => { if (e.target === modalEl) closeSheet(); });
+
+// Setting photos open in an overlay instead of a new tab: tap the thumbnail for the full
+// photo, then close it with the X, a tap on the backdrop, or Esc. The link href stays so
+// middle-click or a long-press can still open the photo on its own.
+function openLightbox(src, alt) {
+  lightboxImg.src = src;
+  lightboxImg.alt = alt || "";
+  lightboxEl.hidden = false;
+}
+function closeLightbox() {
+  lightboxEl.hidden = true;
+  lightboxImg.removeAttribute("src");
+}
+lightboxEl.addEventListener("click", (e) => { if (e.target !== lightboxImg) closeLightbox(); });
+document.addEventListener("click", (e) => {
+  const link = e.target.closest && e.target.closest("a[data-lightbox]");
+  if (!link) return;
+  e.preventDefault();
+  openLightbox(link.getAttribute("href"), link.getAttribute("aria-label"));
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !lightboxEl.hidden) closeLightbox();
+});
 
 function featureOn(name) {
   return !state.settings || state.settings[name] !== false;
@@ -506,7 +531,7 @@ let pendingNav = null;
 // Left and right arrow keys step through gear while a gear page is open and nothing else has the keyboard.
 document.addEventListener("keydown", async (e) => {
   if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
-  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || !modalEl.hidden) return;
+  if (e.altKey || e.ctrlKey || e.metaKey || e.shiftKey || !modalEl.hidden || !lightboxEl.hidden) return;
   if (e.target.closest && e.target.closest("input, select, textarea, [contenteditable]")) return;
   const from = location.hash;
   if (!pendingNav || from !== `#/gear/${pendingNav.id}`) return;
@@ -1358,7 +1383,7 @@ function chainHtml(rig, songId = null) {
           ${songId && featureOn("feature_setting_photos") ? `
             <div class="setting-photos">
               ${(r.photos || []).map((photo) => `<div class="setting-photo">
-                <a href="${esc(photo.url)}" target="_blank" rel="noopener" aria-label="Open photo of ${esc(r.gear_name)}">
+                <a href="${esc(photo.url)}" data-lightbox aria-label="Open photo of ${esc(r.gear_name)}">
                   <img src="${esc(photo.url)}" alt="${esc(r.gear_name)} settings" />
                 </a>
                 <button class="small ghost danger" type="button" data-rig-photo-delete="${photo.id}" aria-label="Delete photo of ${esc(r.gear_name)}">Delete</button>
@@ -1464,7 +1489,7 @@ async function presetDetailView(id) {
     ${featureOn("feature_setting_photos") ? `<h2>Setting photos</h2>
       <div class="card">
         <div class="setting-photos">${p.photos.map((photo) => `<div class="setting-photo">
-          <a href="${esc(photo.url)}" target="_blank" rel="noopener" aria-label="Open photo of ${esc(p.name)}">
+          <a href="${esc(photo.url)}" data-lightbox aria-label="Open photo of ${esc(p.name)}">
             <img src="${esc(photo.url)}" alt="${esc(p.name)} rig" />
           </a>
           <button class="small ghost danger" type="button" data-preset-photo-delete="${photo.id}" aria-label="Delete photo of ${esc(p.name)}">Delete</button>

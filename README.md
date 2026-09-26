@@ -30,9 +30,9 @@
 
 ![Setting photo open in the full-size overlay](docs/screenshots/gearsmith-lightbox.jpg)
 
-**Mobile** - the collection and the photo overlay on a phone.
+**Mobile** - the collection, a preset, and the photo overlay on a phone.
 
-<img src="docs/screenshots/gearsmith-mobile-gear.jpg" alt="Gear collection on a phone" width="380"> <img src="docs/screenshots/gearsmith-mobile-lightbox.jpg" alt="Photo overlay on a phone" width="380">
+<img src="docs/screenshots/gearsmith-mobile-gear.jpg" alt="Gear collection on a phone" width="380"> <img src="docs/screenshots/gearsmith-mobile-preset.jpg" alt="Preset with signal chain on a phone" width="380"> <img src="docs/screenshots/gearsmith-mobile-lightbox.jpg" alt="Photo overlay on a phone" width="380">
 
 ## What it does
 

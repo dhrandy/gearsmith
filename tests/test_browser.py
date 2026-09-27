@@ -1609,3 +1609,68 @@ def test_freeform_knobs_promote_to_item_controls(app_url, width, height):
         if width == 280:
             page.screenshot(path="tests/screenshots/promoted-rig-280.png", full_page=True)
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1440, 900), (390, 844)])
+def test_control_reorder_arrows_visible_on_phone(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        gear = {g["name"]: g for g in req.get(app_url + "/api/gear").json()}
+        drive = gear["Demo Drive"]["id"]
+        assert req.patch(app_url + f"/api/gear/{drive}", data={"specs": {"controls": [
+            {"name": "Gain", "kind": "knob"},
+            {"name": "Tone", "kind": "knob"},
+            {"name": "Level", "kind": "knob"},
+        ]}}).ok
+
+        page.goto(app_url + f"/#/gear/{drive}")
+        page.get_by_role("button", name="Edit controls").click()
+        up = page.get_by_role("button", name="Move Tone earlier")
+        down = page.get_by_role("button", name="Move Gain later")
+        expect(up).to_be_visible()
+        expect(down).to_be_visible()
+        up.click()
+        assert page.locator("[data-ct-name='0']").input_value() == "Tone"
+        page.get_by_role("button", name="Move Tone later").click()
+        assert page.locator("[data-ct-name='0']").input_value() == "Gain"
+        up.click()
+        with page.expect_response(lambda r: r.request.method == "PATCH" and r.url.endswith(f"/api/gear/{drive}")):
+            page.get_by_role("button", name="Save controls").click()
+        controls = req.get(app_url + f"/api/gear/{drive}").json()["controls"]
+        assert [c["name"] for c in controls] == ["Tone", "Gain", "Level"]
+        expect(page.locator("#gd-controls .set-chip").first).to_contain_text("Tone")
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1440, 900), (390, 844)])
+def test_song_rig_display_follows_item_control_order(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        gear = {g["name"]: g for g in req.get(app_url + "/api/gear").json()}
+        amp = gear["Club 20"]["id"]
+        assert req.patch(app_url + f"/api/gear/{amp}", data={"specs": {"controls": [
+            {"name": "Gain", "kind": "knob"},
+            {"name": "Bass", "kind": "knob"},
+            {"name": "Middle", "kind": "knob"},
+            {"name": "Treble", "kind": "knob"},
+            {"name": "Master", "kind": "knob"},
+        ]}}).ok
+        song = req.post(app_url + "/api/songs", data={"title": "Link Order Song", "rig": [
+            {"gear_id": amp, "engaged": "on", "knobs": [
+                {"name": "Treble", "value": "noon"},
+                {"name": "Gain", "value": "9:30"},
+                {"name": "Master", "value": "loud"},
+                {"name": "Pedalish", "value": "extra"},
+            ]}]}).json()
+
+        page.goto(app_url + f"/#/songs/{song['id']}")
+        knobs = page.locator(".chain-item .knob")
+        expect(knobs).to_have_count(4)
+        assert [knobs.nth(i).inner_text().split("\n")[0].lower() for i in range(4)] == ["gain", "treble", "master", "pedalish"]
+        browser.close()

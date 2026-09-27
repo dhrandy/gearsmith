@@ -421,8 +421,8 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; min-hei
   .tab { flex: 1 0 auto; padding: 0 10px; font-size: 14px; }
   .seg { display: flex; width: 100%; }
   .seg a { flex: 1; padding: 0 8px; min-height: 40px; }
-  .ct-row { grid-template-columns: minmax(0, 1fr) minmax(0, 0.7fr) 96px auto; }
-  .ct-row [data-ct-up], .ct-row [data-ct-down] { display: none; }
+  .ct-row { grid-template-columns: minmax(0, 1fr) minmax(0, 0.7fr) 96px; }
+  .ct-row [data-ct-up], .ct-row [data-ct-down], .ct-row [data-ct-del] { grid-row: 2; min-width: 44px; justify-self: start; }
   .form-grid.tight { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .block-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .chain-item { padding-left: 46px; }

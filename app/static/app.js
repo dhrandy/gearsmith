@@ -1376,6 +1376,29 @@ function knobText(knobs, orderEntry = null) {
   }).join("");
 }
 
+/* A rig entry on an item with controls shows the item's panel order, not the order the
+   knobs happened to be saved in: reorder the item's controls and every song follows.
+   Same matching the server migration uses: only knobs the entry already has, extras last. */
+function displayKnobs(r) {
+  const controls = r.controls || [];
+  if (!controls.length) return r.knobs;
+  const byLower = new Map(controls.map((c) => [String(c.name || "").toLowerCase(), c]));
+  const picked = new Map();
+  const extra = [];
+  r.knobs.forEach((k) => {
+    const key = String(k.name || "").toLowerCase();
+    const ctl = byLower.get(key);
+    if (!ctl) extra.push(k);
+    else if (!picked.has(key)) picked.set(key, { ...k, name: ctl.name });
+  });
+  const ordered = [];
+  controls.forEach((c) => {
+    const k = picked.get(String(c.name || "").toLowerCase());
+    if (k) ordered.push(k);
+  });
+  return ordered.concat(extra);
+}
+
 const gearLink = (gid, name) => (gid ? `<a href="#/gear/${gid}">${esc(name)}</a>` : esc(name));
 const setLink = (sid, name) => (sid && featureOn("feature_sets") ? `<a href="#/sets/${sid}">${esc(name)}</a>` : esc(name));
 
@@ -1387,7 +1410,7 @@ function chainHtml(rig, owner = null) {
             <strong class="wrap-any">${gearLink(r.gear_id, r.gear_name)}</strong>
             <span class="engaged eng-${esc(r.engaged)}">${ENGAGED_LABEL[r.engaged] || esc(r.engaged)}</span>
           </div>
-          ${r.knobs.length ? `<div class="knobs">${knobText(r.knobs, owner && !(r.controls && r.controls.length) ? r.id : null)}</div>` : ""}
+          ${r.knobs.length ? `<div class="knobs">${knobText(displayKnobs(r), owner && !(r.controls && r.controls.length) ? r.id : null)}</div>` : ""}
           ${r.note ? `<p class="notes muted">${esc(r.note)}</p>` : ""}
           ${owner && featureOn("feature_setting_photos") ? `
             <div class="setting-photos">

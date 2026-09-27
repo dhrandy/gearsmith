@@ -303,6 +303,8 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent2); b
 .chain-line { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; margin-top: 6px; font-size: 12px; line-height: 1.35; color: var(--muted); overflow-wrap: anywhere; }
 .recall-facts { margin-top: 14px; }
 .recall-facts a { color: var(--text); }
+.song-tab-link { margin: 12px 0 4px; }
+.song-tab-link .btn { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .chain { list-style: none; counter-reset: chain; padding: 0; margin: 0; display: grid; gap: 8px; }
 .chain-item { counter-increment: chain; position: relative; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px 12px 50px; min-width: 0; }
 .chain-item::before {

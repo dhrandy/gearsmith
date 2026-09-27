@@ -1782,6 +1782,7 @@ async function songDetailView(id) {
     ${s.artist ? `<p class="muted wrap-any" style="margin-top:0">${esc(s.artist)}</p>` : ""}
     <div class="chips">${songChips(s)}</div>
     ${rigFacts.length ? `<div class="facts recall-facts">${rigFacts.map(([k, v]) => `<div class="fact"><span>${k}</span>${v}</div>`).join("")}</div>` : ""}
+    ${featureOn("feature_tab_links") && s.tab_url ? `<p class="song-tab-link"><a class="btn small" href="${esc(s.tab_url)}" target="_blank" rel="noopener noreferrer">Open song tab ↗</a></p>` : ""}
     ${s.presets.length ? `
     <h2>Linked artist sounds</h2>
     <div class="stack">
@@ -1944,7 +1945,7 @@ async function songEditorView(id, kind = "song") {
   const draft = song ? {
     title: song.title || "", name: song.name || "", artist: song.artist, tuning: song.tuning || "", capo: song.capo ?? "",
     key: song.key || "", bpm: song.bpm ?? "", guitar_id: song.guitar_id ?? null, amp_id: song.amp_id,
-    set_id: song.set_id ?? null, notes: song.notes,
+    set_id: song.set_id ?? null, notes: song.notes, tab_url: song.tab_url || "",
     presets: (song.presets || []).map((l) => ({ preset_id: l.preset_id, label: l.label, note: l.note, name: l.preset.name })),
     rig: song.rig.map((r) => ({
       gear_id: r.gear_id, gear_name: r.gear_name, engaged: r.engaged, note: r.note,
@@ -1958,7 +1959,7 @@ async function songEditorView(id, kind = "song") {
     })),
   } : {
     title: "", name: "", artist: "", tuning: "", capo: "", key: "", bpm: "", guitar_id: null, amp_id: null, set_id: null,
-    notes: "", presets: [], rig: [], patches: [],
+    notes: "", tab_url: "", presets: [], rig: [], patches: [],
   };
   const guitars = gear.filter((g) => g.type === "guitar");
   const amps = gear.filter((g) => g.type === "amp");
@@ -2048,6 +2049,7 @@ async function songEditorView(id, kind = "song") {
               <select id="sg-guitar"><option value="">None</option>${gearOptions(guitars, draft.guitar_id, song && song.guitar_name)}</select></div>
             <div><label for="sg-amp">Amp</label>
               <select id="sg-amp"><option value="">None</option>${gearOptions(amps, draft.amp_id, song && song.amp_name)}</select></div>
+            <div class="full"><label for="sg-tab-url">Song tab URL (optional)</label><input id="sg-tab-url" data-f="tab_url" type="url" maxlength="1000" inputmode="url" value="${esc(draft.tab_url)}" placeholder="https://..." /><p class="hint">Shows by the song's rig when Tab links are on in Settings. Use a link to a page you trust.</p></div>
             ${featureOn("feature_sets") ? `<div class="full"><label for="sg-set">Set (board or rig)</label>
               <div class="row set-pick">
                 <select id="sg-set"><option value="">None</option>${sets.map((st) => `<option value="${st.id}" ${st.id === draft.set_id ? "selected" : ""}>${esc(st.name)}</option>`).join("")}</select>
@@ -2270,7 +2272,7 @@ async function songEditorView(id, kind = "song") {
       ? { name: draft.name, artist: draft.artist, amp_id: draft.amp_id, notes: draft.notes }
       : {
         title: draft.title, artist: draft.artist, tuning: draft.tuning, capo: intOrNull(draft.capo), key: draft.key,
-        bpm: intOrNull(draft.bpm), guitar_id: draft.guitar_id, amp_id: draft.amp_id, set_id: draft.set_id, notes: draft.notes,
+        bpm: intOrNull(draft.bpm), guitar_id: draft.guitar_id, amp_id: draft.amp_id, set_id: draft.set_id, notes: draft.notes, tab_url: draft.tab_url,
         presets: draft.presets.map((l) => ({ preset_id: l.preset_id, label: l.label, note: l.note })),
       };
     const body = {
@@ -2681,6 +2683,7 @@ async function settingsView() {
         ["feature_values", "Collection value (prices paid, current values and totals)"],
         ["feature_setting_photos", "Photos on presets and song rig settings"],
         ["feature_dials", "Visual knob dials (show positions in song and preset settings)"],
+        ["feature_tab_links", "Song tab links (show saved tab URLs on song pages)"],
         ["feature_token_login", "Sign in with an API token"],
       ].map(([key, label]) => `
         <label class="toggle"><input type="checkbox" data-feature="${key}" ${settings[key] ? "checked" : ""} ${isAdmin ? "" : "disabled"} /> ${label}</label>`).join("")}

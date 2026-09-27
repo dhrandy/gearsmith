@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.11.0"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -358,6 +358,7 @@ def init_db() -> None:
           set_id INTEGER REFERENCES sets(id) ON DELETE SET NULL,
           set_name TEXT NOT NULL DEFAULT '',
           notes TEXT NOT NULL DEFAULT '',
+          tab_url TEXT NOT NULL DEFAULT '',
           created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
@@ -550,6 +551,10 @@ def migrate(c) -> None:
     # 0.5.0: what an item is worth today, next to what you paid.
     if "current_value" not in gear_cols:
         c.execute("ALTER TABLE gear ADD COLUMN current_value REAL")
+    song_cols = {r["name"] for r in c.execute("PRAGMA table_info(songs)")}
+    if "tab_url" not in song_cols:
+        # Existing song data stays intact; this is a new optional field.
+        c.execute("ALTER TABLE songs ADD COLUMN tab_url TEXT NOT NULL DEFAULT ''")
     restring_cols = {r["name"] for r in c.execute("PRAGMA table_info(restrings)")}
     if "strings_id" not in restring_cols:
         c.execute("ALTER TABLE restrings ADD COLUMN strings_id INTEGER REFERENCES gear(id) ON DELETE SET NULL")
@@ -949,7 +954,7 @@ def change_password(body: PasswordChange, request: Request):
 # ---------------------------------------------------------------- optional features
 
 # Hideable sections: each gear type, sets, and the maintenance loop.
-FEATURES = ("guitars", "amps", "pedals", "picks", "strings", "sets", "maintenance", "songs", "want", "sold", "tuner", "values", "setting_photos", "dials")
+FEATURES = ("guitars", "amps", "pedals", "picks", "strings", "sets", "maintenance", "songs", "want", "sold", "tuner", "values", "setting_photos", "dials", "tab_links")
 FEATURE_LABELS = {
     "guitars": "Guitars section",
     "amps": "Amps section",
@@ -970,6 +975,25 @@ def feature_on(c, name: str) -> bool:
 
 
 # ---------------------------------------------------------------- gear
+
+
+def check_tab_url(value: str | None) -> str:
+    """Only absolute web links, without credentials or control characters, belong in a song."""
+    from urllib.parse import urlsplit
+    v = (value or "").strip()
+    if not v:
+        return ""
+    if any(ch.isspace() or ord(ch) == 127 or ch == "\\" for ch in v):
+        raise ValueError("Tab link must be an http:// or https:// URL")
+    try:
+        parsed = urlsplit(v)
+        host = parsed.hostname
+        port = parsed.port  # force validation of malformed ports
+    except ValueError:
+        raise ValueError("Tab link must be an http:// or https:// URL") from None
+    if parsed.scheme.lower() not in ("http", "https") or not host or parsed.username or parsed.password or port == 0:
+        raise ValueError("Tab link must be an http:// or https:// URL without login details")
+    return v
 
 
 def check_url(value: str | None) -> str:
@@ -2431,6 +2455,13 @@ class PatchPatch(BaseModel):
 
 
 class SongIn(BaseModel):
+    tab_url: str = Field(default="", max_length=1000)
+
+    @field_validator("tab_url")
+    @classmethod
+    def _tab_url(cls, v):
+        return check_tab_url(v)
+
     title: str = Field(min_length=1, max_length=120)
     artist: str = Field(default="", max_length=120)
     tuning: str = Field(default="", max_length=40)
@@ -2447,6 +2478,13 @@ class SongIn(BaseModel):
 
 
 class SongPatch(BaseModel):
+    tab_url: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("tab_url")
+    @classmethod
+    def _tab_url(cls, v):
+        return check_tab_url(v) if v is not None else v
+
     title: str | None = Field(default=None, min_length=1, max_length=120)
     artist: str | None = Field(default=None, max_length=120)
     tuning: str | None = Field(default=None, max_length=40)
@@ -2664,6 +2702,7 @@ def song_summary(c, row) -> dict[str, Any]:
         "set_id": row["set_id"],
         "set_name": row["set_name"],
         "notes": row["notes"],
+        "tab_url": row["tab_url"],
         "cover": photos[0]["url"] if photos else None,
         "preset_names": [
             r["name"] for r in c.execute(
@@ -2780,12 +2819,12 @@ def create_song(c, body: SongIn, user_id: int | None) -> int:
     links = song_links(c, {k: data[k] for k in ("guitar_id", "amp_id", "set_id")})
     song_id = c.execute(
         """INSERT INTO songs(title,artist,tuning,capo,song_key,bpm,guitar_id,guitar_name,amp_id,amp_name,
-           set_id,set_name,notes,created_by,created_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           set_id,set_name,notes,tab_url,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             body.title.strip(), body.artist.strip(), body.tuning.strip(), body.capo, body.key.strip(), body.bpm,
             links.get("guitar_id"), links.get("guitar_name", ""), links.get("amp_id"), links.get("amp_name", ""),
-            links.get("set_id"), links.get("set_name", ""), body.notes.strip(), user_id, stamp, stamp,
+            links.get("set_id"), links.get("set_name", ""), body.notes.strip(), body.tab_url, user_id, stamp, stamp,
         ),
     ).lastrowid
     if body.rig:
@@ -2803,7 +2842,7 @@ def update_song(c, row, body: SongPatch) -> None:
     patches = data.pop("patches", None)
     presets = data.pop("presets", None)
     cols = song_links(c, {k: data.pop(k) for k in ("guitar_id", "amp_id", "set_id") if k in data})
-    for key in ("title", "artist", "tuning", "key", "notes"):
+    for key in ("title", "artist", "tuning", "key", "notes", "tab_url"):
         if key in data:
             if data[key] is None:
                 if key == "title":
@@ -3673,6 +3712,7 @@ class SettingsIn(BaseModel):
     feature_values: bool | None = None
     feature_setting_photos: bool | None = None
     feature_dials: bool | None = None
+    feature_tab_links: bool | None = None
     feature_token_login: bool | None = None
 
 

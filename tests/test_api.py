@@ -1067,7 +1067,7 @@ def test_v030_database_upgrade_keeps_every_row(tmp_path):
         conn.row_factory = None
         for t in tables:
             cols = [r[1] for r in conn.execute(f"PRAGMA table_info({t})")
-                    if r[1] not in ("strings_id", "sets_on_hand", "manual_url", "current_value")]
+                    if r[1] not in ("strings_id", "sets_on_hand", "manual_url", "current_value", "tab_url")]
             after = conn.execute(f"SELECT {', '.join(cols)} FROM {t} ORDER BY rowid").fetchall()
             assert after == before[t], t
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
@@ -1614,3 +1614,27 @@ def test_dials_feature_and_rig_order_round_trip(tmp_path):
         knobs.reverse()
         assert c.patch(f"/api/songs/{song['id']}", json={"rig": [{"gear_name": "Delay", "knobs": knobs}]}).status_code == 200
         assert c.get(f"/api/songs/{song['id']}").json()["rig"][0]["knobs"] == knobs
+
+
+def test_song_tab_url_validation_round_trip_and_migration(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        assert c.get("/api/settings").json()["feature_tab_links"] is True
+        tab = "https://tabs.example.test/chords?song=one&key=C"
+        song = c.post("/api/songs", json={"title": "Tab test", "tab_url": tab}).json()
+        sid = song["id"]
+        assert song["tab_url"] == tab
+        assert next(x for x in c.get("/api/songs").json() if x["id"] == sid)["tab_url"] == tab
+        assert c.get("/api/export").json()["songs"][0]["tab_url"] == tab
+        assert c.patch(f"/api/songs/{sid}", json={"title": "Renamed"}).json()["tab_url"] == tab
+        assert c.put("/api/settings", json={"feature_tab_links": False}).json()["feature_tab_links"] is False
+        assert c.get(f"/api/songs/{sid}").json()["tab_url"] == tab
+        for bad in ("javascript:alert(1)", "data:text/html,x", "https://user:pw@tabs.example.test/x", "https://", "https://tabs.example.test\nnot-a-url", "https://tabs.example.test/a b", "https://tabs.example.test\\@evil.test"):
+            assert c.patch(f"/api/songs/{sid}", json={"tab_url": bad}).status_code == 422
+        assert c.patch(f"/api/songs/{sid}", json={"tab_url": ""}).json()["tab_url"] == ""
+        assert c.get(f"/api/songs/{sid}").json()["tab_url"] == ""
+    with main.db() as conn:
+        assert "tab_url" in {r["name"] for r in conn.execute("PRAGMA table_info(songs)")}
+        main.migrate(conn)
+        assert "tab_url" in {r["name"] for r in conn.execute("PRAGMA table_info(songs)")}

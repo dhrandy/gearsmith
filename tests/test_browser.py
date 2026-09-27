@@ -1431,3 +1431,38 @@ def test_visual_dials_order_and_fallback(app_url, width, height):
         expect(page.locator(".chain-item .knob").first).to_contain_text("noon")
         assert_no_overflow(page, "text fallback")
         browser.close()
+
+@pytest.mark.parametrize("width,height", [(1280, 900), (390, 844), (320, 720), (280, 653)])
+def test_song_tab_link_edit_visibility_and_mobile(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        page.goto(app_url + "/#/songs/new")
+        page.locator("#sg-title").fill("Tabs on this song")
+        page.locator("#sg-tab-url").fill("https://tabs.example.test/song?key=G&part=verse")
+        assert_no_overflow(page, "song tab editor")
+        if width in (280, 390):
+            page.screenshot(path=f"tests/screenshots/tab-edit-{width}.png", full_page=True)
+        with page.expect_response(lambda r: r.request.method == "POST" and r.url.endswith("/api/songs")):
+            page.get_by_role("button", name="Add song").click()
+        link = page.get_by_role("link", name="Open song tab")
+        expect(link).to_be_visible()
+        assert link.get_attribute("href") == "https://tabs.example.test/song?key=G&part=verse"
+        assert link.get_attribute("target") == "_blank"
+        assert link.get_attribute("rel") == "noopener noreferrer"
+        assert_no_overflow(page, "song tab display")
+        if width in (280, 390, 1280):
+            page.screenshot(path=f"tests/screenshots/tab-detail-{width}.png", full_page=True)
+        song_url = page.url
+        page.goto(app_url + "/#/settings")
+        page.locator("[data-feature=feature_tab_links]").uncheck()
+        page.goto(song_url)
+        expect(page.get_by_role("link", name="Open song tab")).to_have_count(0)
+        page.get_by_role("link", name="Edit", exact=True).click()
+        expect(page.locator("#sg-tab-url")).to_have_value("https://tabs.example.test/song?key=G&part=verse")
+        page.goto(app_url + "/#/settings")
+        page.locator("[data-feature=feature_tab_links]").check()
+        page.goto(song_url)
+        expect(page.get_by_role("link", name="Open song tab")).to_be_visible()
+        browser.close()

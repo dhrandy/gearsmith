@@ -289,7 +289,8 @@ def test_star_toggle_floats_to_top_and_favorites_filter(app_url, width, height):
         page.evaluate("window.__noReload = true")
         detail.click()
         expect(page.locator("#gd-fav-wrap button")).to_have_attribute("aria-pressed", "false")
-        expect(page.locator("#gd-fav-wrap button")).to_contain_text("☆")
+        expect(page.locator("#gd-fav-wrap button svg")).to_have_count(1)
+        expect(page.locator("#gd-fav-wrap button")).to_have_attribute("aria-pressed", "false")
         assert page.evaluate("window.__noReload") is True
         page.get_by_role("link", name="Gear", exact=True).first.click()
         expect(page.get_by_text("No favorites yet")).to_be_visible()
@@ -534,8 +535,10 @@ def test_presets_follow_songs_and_artist_view(app_url, width, height):
         expect(band.locator("h2")).to_contain_text("1 song · 1 sound")
         assert_no_overflow(page, "artists view")
         page.locator("#global-search").fill("second")
+        page.locator("#global-search").press("Enter")
         expect(groups).to_have_count(1)
         page.locator("#global-search").fill("")
+        page.locator("#global-search").press("Enter")
 
         # save a song's own chain as a preset, switching the song over
         other = [s for s in req.get(app_url + "/api/songs").json() if s["title"] == "Other Song"][0]
@@ -592,8 +595,10 @@ def test_strings_type_and_guitar_picks_strings(app_url, width, height):
         # search matches the gauge, the string-type filter narrows the strings section
         page.goto(app_url + "/#/")
         page.locator("#global-search").fill("9-42")
+        page.locator("#global-search").press("Enter")
         expect(page.locator(".gear-card")).to_have_count(1)
         page.locator("#global-search").fill("")
+        page.locator("#global-search").press("Enter")
         page.locator("#string-type-filter").select_option("bass")
         expect(page.locator(".gear-card", has_text="Ui Strings 9-42")).to_have_count(0)
         expect(page.locator(".gear-card", has_text="Starling")).to_have_count(1)
@@ -909,6 +914,7 @@ def test_gear_page_previous_and_next(app_url, width, height):
         # a filtered Gear page is the list you walk
         page.goto(app_url + "/#/")
         page.locator("#global-search").fill("Starling")
+        page.locator("#global-search").press("Enter")
         expect(page.locator(".gear-card")).to_have_count(1)
         page.locator(".gear-card").first.click()
         expect(page.get_by_role("heading", name="Starling", exact=True)).to_be_visible()
@@ -1200,10 +1206,31 @@ def test_global_search(app_url, width, height):
         expect(page.locator("#artist-search")).to_have_count(0)
         page.goto(app_url + "/#/")
         expect(page.locator("#gear-search")).to_have_count(0)
-        # it narrows the list on screen while the dropdown searches everything
+        # Typing offers quick jumps without changing the page below.
+        expect(page.locator(".gear-card")).to_have_count(7)
+        original_count = page.locator(".gear-card").count()
         box.fill("starling")
+        expect(drop.locator(".gsr-item", has_text="Starling")).to_be_visible()
+        expect(page.locator(".gear-card")).to_have_count(original_count)
+        # Tapping outside discards the uncommitted query and restores the page.
+        page.locator("#view .section-title").first.click()
+        expect(drop).to_be_hidden()
+        expect(box).to_have_value("")
+        expect(page.locator(".gear-card")).to_have_count(original_count)
+        # Enter (also the phone keyboard Search/Go key) commits a page filter.
+        box.fill("starling")
+        box.press("Enter")
+        expect(page.locator(".gear-card")).to_have_count(1)
+        expect(drop).to_be_hidden()
+        # Editing the query does not change the committed filter until Enter.
+        box.fill("heron")
+        expect(page.locator(".gear-card")).to_have_count(1)
+        page.locator("#view .section-title").first.click()
+        expect(box).to_have_value("starling")
         expect(page.locator(".gear-card")).to_have_count(1)
         box.fill("")
+        box.press("Enter")
+        expect(page.locator(".gear-card")).to_have_count(original_count)
         box.fill("starling")
         drop.locator(".gsr-item", has_text="Starling").click()
         expect(page.get_by_role("heading", name="Starling", exact=True)).to_be_visible()

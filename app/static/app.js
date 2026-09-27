@@ -256,6 +256,17 @@ window.addEventListener("hashchange", () => {
   route();
 });
 
+/* Icon-only actions keep their full accessible name and tooltip. */
+const ACTION_PATHS = {
+  add: "M12 5v14M5 12h14",
+  edit: "M4 20l4-.8L19 8a2.1 2.1 0 0 0-3-3L5 16z",
+  delete: "M4 7h16M10 4h4m4 3-1 13H7L6 7m4 3v7m4-7v7",
+  share: "M12 16V3m0 0L7 8m5-5 5 5M4 17v3h16v-3",
+};
+function actionIcon(kind) {
+  return `<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${ACTION_PATHS[kind]}" /></svg>`;
+}
+
 /* ---------------------------------------------------------------- favorites */
 
 const FAV_ONLY_KEY = "gearsmith.favoritesOnly";
@@ -278,7 +289,7 @@ function starButton(g, cls = "star", text = "") {
   const label = g.favorite ? `Remove ${g.name} from favorites` : `Add ${g.name} to favorites`;
   return `<button class="${cls}${g.favorite ? " on" : ""}" type="button" data-fav="${g.id}"
     aria-pressed="${g.favorite}" aria-label="${esc(label)}" title="${g.favorite ? "Favorite" : "Mark as favorite"}">
-    <span aria-hidden="true">${g.favorite ? "★" : "☆"}</span>${text ? ` ${esc(text)}` : ""}</button>`;
+    <span aria-hidden="true">${cls.includes("star-detail") ? `<svg viewBox="0 0 24 24"><path d="m12 2 3 6 6.5 1-4.7 4.7 1.1 6.7L12 16l-5.9 3.4 1.1-6.7L2.5 9 9 8z" /></svg>` : g.favorite ? "★" : "☆"}</span>${text ? ` ${esc(text)}` : ""}</button>`;
 }
 
 async function toggleFavorite(g) {
@@ -325,7 +336,7 @@ async function gearListView(lifecycle = "owned") {
   view.innerHTML = `
     <div class="pagehead">
       <h1>${heading}</h1>
-      ${addLabel ? `<button class="primary" id="add-gear" type="button">${addLabel}</button>` : ""}
+      ${addLabel ? `<button class="primary action-icon" id="add-gear" type="button" aria-label="${addLabel}" title="${addLabel}">${actionIcon("add")}</button>` : ""}
     </div>
     ${lifecycleNav(lifecycle)}
     <div id="gear-totals"></div>
@@ -340,8 +351,8 @@ async function gearListView(lifecycle = "owned") {
     </div>
     <div id="gear-sections"></div>`;
   const container = document.getElementById("gear-sections");
-  // One sitewide box: the header search narrows this grid while its dropdown searches everything.
-  let needle = (document.getElementById("global-search").value || "").trim().toLowerCase();
+  // Only a submitted search filters this grid; typing offers quick jumps without moving the page.
+  let needle = "";
   state.listFilter = (v) => { needle = v.trim().toLowerCase(); render(); };
   // Settings > Features > Collection value turns the money line off; the prices stay saved.
   if (featureOn("feature_values")) {
@@ -706,10 +717,10 @@ async function gearDetailView(id) {
     <div class="pagehead">
       <h1>${esc(g.name)}</h1>
       <div class="row">
-        <span id="gd-fav-wrap">${starButton(g, "small star-btn", "Favorite")}</span>
+        <span id="gd-fav-wrap">${starButton(g, "small star-btn action-icon star-detail")}</span>
         ${g.manual_url ? `<a class="btn small" href="${esc(g.manual_url)}" target="_blank" rel="noopener noreferrer">Manual &#8599;</a>` : ""}
-        <button class="small" id="gd-edit" type="button">Edit</button>
-        <button class="small danger" id="gd-delete" type="button">Delete</button>
+        <button class="action-icon" id="gd-edit" type="button" aria-label="Edit" title="Edit">${actionIcon("edit")}</button>
+        <button class="action-icon danger" id="gd-delete" type="button" aria-label="Delete" title="Delete">${actionIcon("delete")}</button>
       </div>
     </div>
     <p class="muted wrap-any">${esc(g.type_singular || TYPE_SINGULAR[g.type])}${g.sets.length ? " · in " + g.sets.map((s) => setLink(s.id, s.name)).join(", ") : ""}</p>
@@ -827,7 +838,7 @@ async function gearDetailView(id) {
     btn.disabled = true;
     try {
       await toggleFavorite(g);
-      favWrap.innerHTML = starButton(g, "small star-btn", "Favorite");
+      favWrap.innerHTML = starButton(g, "small star-btn action-icon star-detail");
       favWrap.querySelector("button").focus({ preventScroll: true });
     } catch (ex) {
       btn.disabled = false;
@@ -1155,7 +1166,7 @@ async function loadRestringHistory(g) {
       <span class="rs-date">${fmtDate(r.date)}</span>
       <span>${r.strings ? `<a href="#/gear/${r.strings.id}">${esc([r.brand, r.gauge].filter(Boolean).join(" ") || r.strings.name)}</a>` : esc([r.brand, r.gauge].filter(Boolean).join(" ")) || "Restring"}${r.note ? ` <span class="muted">- ${esc(r.note)}</span>` : ""}
         <span class="muted"> · ${esc(r.logged_by)}</span></span>
-      <button class="small ghost danger" data-delrs="${r.id}" type="button">Delete</button>
+      <button class="action-icon ghost danger" data-delrs="${r.id}" type="button" aria-label="Delete" title="Delete">${actionIcon("delete")}</button>
     </div>`).join("") : `<p class="muted">No restrings logged yet.</p>`;
   el.querySelectorAll("[data-delrs]").forEach((b) => b.addEventListener("click", async () => {
     await api(`/api/restrings/${b.dataset.delrs}`, { method: "DELETE" });
@@ -1238,8 +1249,8 @@ async function loadMaintenanceHistory(g) {
       <span><span class="badge">${esc(MAINT_LABEL[r.category] || r.category)}</span> ${r.note ? esc(r.note) : `<span class="muted">No note</span>`}
         <span class="muted"> &middot; ${esc(r.logged_by)}</span></span>
       <span class="row" style="gap:4px;flex-wrap:nowrap">
-        <button class="small ghost" data-editmaint="${r.id}" type="button">Edit</button>
-        <button class="small ghost danger" data-delmaint="${r.id}" type="button">Delete</button>
+        <button class="action-icon ghost" data-editmaint="${r.id}" type="button" aria-label="Edit" title="Edit">${actionIcon("edit")}</button>
+        <button class="action-icon ghost danger" data-delmaint="${r.id}" type="button" aria-label="Delete" title="Delete">${actionIcon("delete")}</button>
       </span>
     </div>`).join("") : `<p class="muted">Nothing logged yet.</p>`;
   el.querySelectorAll("[data-editmaint]").forEach((b) => b.addEventListener("click", () => {
@@ -1361,13 +1372,13 @@ async function songsView() {
   view.innerHTML = `
     <div class="pagehead">
       <h1>Songs</h1>
-      <a class="btn primary" href="#/songs/new">Add song</a>
+      <a class="btn primary action-icon" href="#/songs/new" aria-label="Add song" title="Add song">${actionIcon("add")}</a>
     </div>
     ${songsNav("songs")}
     <p class="muted">Your rig and tone for each song: which guitar and amp, where every knob sits, and which patch and scene on a modeler.</p>
     <div class="grid" id="song-list"></div>`;
   const list = document.getElementById("song-list");
-  let needle = (document.getElementById("global-search").value || "").trim().toLowerCase();
+  let needle = "";
   state.listFilter = (v) => { needle = v.trim().toLowerCase(); render(); };
   function render() {
     const shown = songs.filter((s) => !needle || `${s.title} ${s.artist}`.toLowerCase().includes(needle));
@@ -1451,7 +1462,7 @@ function chainHtml(rig, owner = null) {
                 <a href="${esc(photo.url)}" data-lightbox aria-label="Open photo of ${esc(r.gear_name)}">
                   <img src="${esc(photo.url)}" alt="${esc(r.gear_name)} settings" />
                 </a>
-                <button class="small ghost danger" type="button" data-rig-photo-delete="${photo.id}" aria-label="Delete photo of ${esc(r.gear_name)}">Delete</button>
+                <button class="action-icon ghost danger" type="button" data-rig-photo-delete="${photo.id}" aria-label="Delete photo of ${esc(r.gear_name)}" title="Delete photo">${actionIcon("delete")}</button>
               </div>`).join("")}
             </div>
             <form class="row setting-photo-form" data-rig-photo-upload="${r.id}">
@@ -1487,13 +1498,13 @@ async function artistsView() {
   view.innerHTML = `
     <div class="pagehead">
       <h1>Artists</h1>
-      <a class="btn primary" href="#/presets/new">Add artist sound</a>
+      <a class="btn primary action-icon" href="#/presets/new" aria-label="Add artist sound" title="Add artist sound">${actionIcon("add")}</a>
     </div>
     ${songsNav("artists")}
     <p class="muted">Songs and artist sounds, grouped by artist. Song rigs stay with Songs; physical boards live in My Boards.</p>
     <div id="artist-list"></div>`;
   const list = document.getElementById("artist-list");
-  let needle = (document.getElementById("global-search").value || "").trim().toLowerCase();
+  let needle = "";
   state.listFilter = (v) => { needle = v.trim().toLowerCase(); render(); };
   function render() {
     const shown = groups.filter((g) => !needle || g.artist.toLowerCase().includes(needle));
@@ -1522,8 +1533,8 @@ async function presetDetailView(id) {
     <div class="pagehead">
       <h1>${esc(p.name)}</h1>
       <div class="row">
-        <a class="btn small" href="#/presets/${p.id}/edit">Edit</a>
-        <button class="small danger" id="pd-delete" type="button">Delete</button>
+        <a class="btn action-icon" href="#/presets/${p.id}/edit" aria-label="Edit" title="Edit">${actionIcon("edit")}</a>
+        <button class="action-icon danger" id="pd-delete" type="button" aria-label="Delete" title="Delete">${actionIcon("delete")}</button>
       </div>
     </div>
     ${p.artist ? `<p class="muted wrap-any" style="margin-top:0">${esc(p.artist)}</p>` : ""}
@@ -1536,7 +1547,7 @@ async function presetDetailView(id) {
           <a href="${esc(photo.url)}" data-lightbox aria-label="Open photo of ${esc(p.name)}">
             <img src="${esc(photo.url)}" alt="${esc(p.name)} rig" />
           </a>
-          <button class="small ghost danger" type="button" data-preset-photo-delete="${photo.id}" aria-label="Delete photo of ${esc(p.name)}">Delete</button>
+          <button class="action-icon ghost danger" type="button" data-preset-photo-delete="${photo.id}" aria-label="Delete photo of ${esc(p.name)}" title="Delete photo">${actionIcon("delete")}</button>
         </div>`).join("")}</div>
         <form id="preset-photo-form" class="row setting-photo-form">
           <input type="file" accept="image/*" aria-label="Preset photo" required />
@@ -1626,7 +1637,7 @@ async function setlistsView() {
   view.innerHTML = `
     <div class="pagehead">
       <h1>Setlists</h1>
-      <button class="primary" id="add-setlist" type="button">New setlist</button>
+      <button class="primary action-icon" id="add-setlist" type="button" aria-label="New setlist" title="New setlist">${actionIcon("add")}</button>
     </div>
     ${songsNav("setlists")}
     <p class="muted">Line up songs for a practice session or a gig. Each song shows its presets and knob settings, so the whole run is on one page.</p>
@@ -1738,8 +1749,8 @@ async function setlistDetailView(id) {
       <div class="pagehead">
         <h1>${esc(l.name)}</h1>
         <div class="row">
-          <button class="small" id="sl-edit" type="button">Edit</button>
-          <button class="small danger" id="sl-delete" type="button">Delete</button>
+          <button class="action-icon" id="sl-edit" type="button" aria-label="Edit" title="Edit">${actionIcon("edit")}</button>
+          <button class="action-icon danger" id="sl-delete" type="button" aria-label="Delete" title="Delete">${actionIcon("delete")}</button>
         </div>
       </div>
       <p class="muted wrap-any sl-meta">${entries.length} song${entries.length === 1 ? "" : "s"}${guitars.size ? ` · ${guitars.size} guitar${guitars.size === 1 ? "" : "s"}` : ""}</p>
@@ -1771,7 +1782,7 @@ async function setlistDetailView(id) {
         }).join("")}
       </ol>
       ${entries.length ? "" : `<p class="empty">No songs yet. Add some to build the run.</p>`}
-      <p><button class="primary" id="sl-add" type="button">Add songs</button></p>`;
+      <p><button class="primary action-icon" id="sl-add" type="button" aria-label="Add songs" title="Add songs">${actionIcon("add")}</button></p>`;
 
     document.getElementById("sl-edit").addEventListener("click", () => setlistForm(l));
     document.getElementById("sl-delete").addEventListener("click", () => {
@@ -1858,9 +1869,9 @@ async function songDetailView(id) {
     <div class="pagehead">
       <h1>${esc(s.title)}</h1>
       <div class="row">
-        <a class="btn small" href="#/songs/${s.id}/edit">Edit</a>
+        <a class="btn action-icon" href="#/songs/${s.id}/edit" aria-label="Edit" title="Edit">${actionIcon("edit")}</a>
         ${s.rig.length || s.patches.length ? `<button class="small" id="sd-save-preset" type="button">Save as preset</button>` : ""}
-        <button class="small danger" id="sd-delete" type="button">Delete</button>
+        <button class="action-icon danger" id="sd-delete" type="button" aria-label="Delete" title="Delete">${actionIcon("delete")}</button>
       </div>
     </div>
     ${s.artist ? `<p class="muted wrap-any" style="margin-top:0">${esc(s.artist)}</p>` : ""}
@@ -1894,7 +1905,7 @@ async function songDetailView(id) {
             <img src="${p.url}" alt="" />
             <div class="row">
               ${i > 0 ? `<button class="small ghost" data-scover="${p.id}" type="button">Cover</button>` : `<span class="badge">Cover</span>`}
-              <button class="small ghost danger" data-sdelphoto="${p.id}" type="button">Delete</button>
+              <button class="action-icon ghost danger" data-sdelphoto="${p.id}" type="button" aria-label="Delete" title="Delete">${actionIcon("delete")}</button>
             </div>
           </div>`).join("")}
       </div>
@@ -2460,7 +2471,7 @@ async function setsView() {
   view.innerHTML = `
     <div class="pagehead">
       <h1>My Boards</h1>
-      <button class="primary" id="add-set" type="button">New board or setup</button>
+      <button class="primary action-icon" id="add-set" type="button" aria-label="New board or setup" title="New board or setup">${actionIcon("add")}</button>
     </div>
     <p class="muted">Your physical boards and setups. Keep their gear and signal order here; song-specific settings stay in Songs.</p>
     <div class="stack" id="sets-list">
@@ -2469,9 +2480,9 @@ async function setsView() {
           <div class="row set-card-head">
             <strong><a class="set-name" href="#/sets/${s.id}">${esc(s.name)}</a></strong>
             <span class="row">
-              <button class="small ghost" data-shareset="${s.id}" type="button">${s.share && !s.share.expired ? "Shared" : "Share"}</button>
-              <button class="small ghost" data-editset="${s.id}" type="button">Edit</button>
-              <button class="small ghost danger" data-delset="${s.id}" type="button">Delete</button>
+              <button class="action-icon ghost" data-shareset="${s.id}" type="button" aria-label="${s.share && !s.share.expired ? "Shared" : "Share"}" title="${s.share && !s.share.expired ? "Shared" : "Share"}">${actionIcon("share")}</button>
+              <button class="action-icon ghost" data-editset="${s.id}" type="button" aria-label="Edit" title="Edit">${actionIcon("edit")}</button>
+              <button class="action-icon ghost danger" data-delset="${s.id}" type="button" aria-label="Delete" title="Delete">${actionIcon("delete")}</button>
             </span>
           </div>
           ${s.notes ? `<p class="muted set-notes" style="margin:6px 0 0">${esc(s.notes)}</p>` : ""}
@@ -2524,8 +2535,8 @@ async function setDetailView(id) {
     <div class="pagehead">
       <h1>${esc(s.name)}</h1>
       <div class="row">
-        <button class="small" id="sd-set-edit" type="button">Edit</button>
-        <button class="small danger" id="sd-set-delete" type="button">Delete</button>
+        <button class="action-icon" id="sd-set-edit" type="button" aria-label="Edit" title="Edit">${actionIcon("edit")}</button>
+        <button class="action-icon danger" id="sd-set-delete" type="button" aria-label="Delete" title="Delete">${actionIcon("delete")}</button>
       </div>
     </div>
     <p class="muted wrap-any" style="margin-top:0">${count} item${count === 1 ? "" : "s"}</p>
@@ -3305,6 +3316,7 @@ function tunerView() {
   let timer = null;
   let lastFetch = 0;
   let active = -1;
+  let committedQuery = "";
 
   function close(clear = false) {
     drop.hidden = true;
@@ -3312,6 +3324,7 @@ function tunerView() {
     active = -1;
     if (clear) {
       input.value = "";
+      committedQuery = "";
       if (state.listFilter) state.listFilter("");
     }
   }
@@ -3390,27 +3403,42 @@ function tunerView() {
   }
 
   input.addEventListener("input", () => {
-    if (state.listFilter) state.listFilter(input.value);
+    // Typing only updates quick-jump suggestions; it does not change the page.
     clearTimeout(timer);
+    ++lastFetch; // invalidate any prior response while the new query is debounced
+    if (input.value.trim().length < 2) { close(); return; }
     timer = setTimeout(run, 200);
   });
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") { close(true); input.blur(); }
+    if (e.key === "Escape") { clearTimeout(timer); ++lastFetch; close(true); input.blur(); }
     else if (e.key === "ArrowDown") { e.preventDefault(); highlight(active + 1); }
     else if (e.key === "ArrowUp") { e.preventDefault(); highlight(active - 1); }
     else if (e.key === "Enter") {
+      e.preventDefault();
+      clearTimeout(timer);
+      ++lastFetch;
       const links = items();
-      if (links.length) { e.preventDefault(); links[active >= 0 ? active : 0].click(); }
+      if (active >= 0 && links[active]) { links[active].click(); return; }
+      committedQuery = input.value.trim();
+      if (state.listFilter) state.listFilter(committedQuery);
+      close();
+      input.blur();
     }
   });
   input.addEventListener("focus", () => { if (input.value.trim().length >= 2) run(); });
   document.addEventListener("click", (e) => {
-    if (!drop.hidden && !e.target.closest(".gsearch")) close();
+    if (!e.target.closest(".gsearch")) {
+      clearTimeout(timer);
+      ++lastFetch; // ignore a search response still in flight
+      if (!drop.hidden) close();
+      // A tap outside cancels uncommitted typing and shows the page as it was.
+      input.value = committedQuery;
+    }
   });
   drop.addEventListener("click", (e) => {
-    if (e.target.closest(".gsr-item")) close(true);
+    if (e.target.closest(".gsr-item")) { clearTimeout(timer); ++lastFetch; close(true); }
   });
-  window.addEventListener("hashchange", () => close());
+  window.addEventListener("hashchange", () => { clearTimeout(timer); ++lastFetch; close(true); });
 })();
 
 /* ---------------------------------------------------------------- boot */

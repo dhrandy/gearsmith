@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.9.1"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -830,12 +830,10 @@ def status():
     with db() as c:
         setup_required = c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
         name = get_setting(c, "app_name", "Gearsmith")
-        token_login_enabled = get_setting(c, "feature_token_login", "1") == "1"
     return {
         "setup_required": setup_required,
         "app_name": name,
         "version": APP_VERSION,
-        "token_login_enabled": token_login_enabled,
     }
 
 
@@ -882,10 +880,13 @@ def login(body: LoginCredentials, request: Request, response: Response):
         raise HTTPException(
             429, "Too many login attempts. Try again later.", headers={"Retry-After": str(retry)}
         )
-    if body.token is not None and body.username is None and body.password is None:
+    token_value = body.token or (
+        body.password if body.username == "" and body.password and body.password.startswith("gs_") else None
+    )
+    if token_value is not None and body.username in (None, "") and (body.token is None or body.password is None):
         with db() as c:
             enabled = get_setting(c, "feature_token_login", "1") == "1"
-        row = token_login_user(body.token) if enabled and 1 <= len(body.token) <= 200 else None
+        row = token_login_user(token_value) if enabled and 1 <= len(token_value) <= 200 else None
     elif body.token is None and body.username is not None and body.password is not None:
         with db() as c:
             row = c.execute(

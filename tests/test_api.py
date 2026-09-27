@@ -1522,8 +1522,11 @@ def test_token_sign_in_uses_owner_session_and_shared_login_limit(tmp_path, monke
         visitor.post('/api/logout')
         assert visitor.get('/api/me').status_code == 401
 
-        # A token cannot be squeezed through the password field or used with
-        # another username. No secret should appear in an error response.
+        # A token may be used in the password field only with an empty username.
+        # It cannot be used with another username. No secret should appear in an error response.
+        assert visitor.post('/api/login', json={'username': '', 'password': token}).status_code == 200
+        visitor.post('/api/logout')
+        assert visitor.post('/api/login', json={'username': '', 'password': 'gs_wrong'}).status_code == 401
         for body in ({'username': 'admin-test', 'password': token},
                      {'username': 'admin-test', 'token': token}):
             response = visitor.post('/api/login', json=body)
@@ -1544,7 +1547,8 @@ def test_token_sign_in_uses_owner_session_and_shared_login_limit(tmp_path, monke
 
         # Disabling website token sign-in leaves password and bearer API access intact.
         assert admin.put('/api/settings', json={'feature_token_login': False}).json()['feature_token_login'] is False
-        assert admin.get('/api/status').json()['token_login_enabled'] is False
+        assert 'token_login_enabled' not in admin.get('/api/status').json()
+        assert visitor.post('/api/login', json={'username': '', 'password': token}).status_code == 401
         assert visitor.post('/api/login', json={'token': token}).status_code == 401
         assert visitor.post('/api/login', json={'username': 'admin-test', 'password': 'password-123'}).status_code == 200
         assert visitor.get('/api/me').status_code == 200

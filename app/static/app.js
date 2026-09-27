@@ -171,49 +171,22 @@ function authView() {
       <div class="card stack">
         <h1 style="margin-top:0">${setup ? "Set up " + esc(state.appName) : "Sign in"}</h1>
         ${setup ? `<p class="muted">Create the administrator account to get started.</p>` : ""}
-        ${!setup && state.tokenLoginEnabled ? `<div class="auth-choice" role="group" aria-label="Sign-in method">
-          <button type="button" id="auth-password-mode" aria-pressed="true">Password</button>
-          <button type="button" id="auth-token-mode" aria-pressed="false">API token</button>
-        </div>` : ""}
         <form id="auth-form" class="stack">
-          <div id="username-field"><label for="username">Username</label><input id="username" name="username" autocomplete="username" required /></div>
+          <div id="username-field"><label for="username">Username</label><input id="username" name="username" autocomplete="username" ${setup ? "required" : ""} /></div>
           <div id="password-field"><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="${setup ? "new-password" : "current-password"}" required /></div>
-          ${!setup && state.tokenLoginEnabled ? `<div id="token-field" hidden><label for="token">API token</label><input id="token" name="token" type="password" autocomplete="off" maxlength="200" /></div>` : ""}
           <p class="error" id="auth-error"></p>
           <button class="primary" type="submit">${setup ? "Create administrator" : "Sign in"}</button>
         </form>
       </div>
     </div>`;
-  let tokenMode = false;
-  if (!setup && state.tokenLoginEnabled) {
-    for (const mode of ["password", "token"]) {
-      document.getElementById(`auth-${mode}-mode`).addEventListener("click", () => {
-        tokenMode = mode === "token";
-        document.getElementById("username-field").hidden = tokenMode;
-        document.getElementById("password-field").hidden = tokenMode;
-        document.getElementById("token-field").hidden = !tokenMode;
-        document.getElementById("username").required = !tokenMode;
-        document.getElementById("password").required = !tokenMode;
-        document.getElementById("token").required = tokenMode;
-        document.getElementById("password").value = "";
-        document.getElementById("token").value = "";
-        document.getElementById("auth-password-mode").setAttribute("aria-pressed", String(!tokenMode));
-        document.getElementById("auth-token-mode").setAttribute("aria-pressed", String(tokenMode));
-        document.getElementById("auth-error").textContent = "";
-      });
-    }
-  }
   document.getElementById("auth-form").addEventListener("submit", async (e) => {
     e.preventDefault();
     const err = document.getElementById("auth-error");
     err.textContent = "";
-    const body = tokenMode ? { token: document.getElementById("token").value } : {
-      username: document.getElementById("username").value,
-      password: document.getElementById("password").value,
-    };
+    const body = { username: document.getElementById("username").value.trim(),
+      password: document.getElementById("password").value };
     try {
       await api(setup ? "/api/setup" : "/api/login", { method: "POST", body });
-      if (tokenMode) document.getElementById("token").value = "";
       await boot(true);
     } catch (ex) {
       err.textContent = ex.message;
@@ -3255,7 +3228,6 @@ async function boot(skipStatus = false) {
     state.setupRequired = st.setup_required;
     state.appName = st.app_name || "Gearsmith";
     state.version = st.version || "";
-    state.tokenLoginEnabled = st.token_login_enabled;
   }
   document.getElementById("app-name").textContent = state.appName;
   try {

@@ -83,7 +83,7 @@ Boards, presets and songs are separate views of the same gear, not duplicate gea
 - **Hideable sections** - don't have pedals? Don't care about songs or a wish list? Turn the section off in Settings > Features and it leaves the interface. Hidden sections keep their data.
 - **Install it like an app** - add Gearsmith to your phone's home screen (Share > Add to Home Screen on iPhone, Install app on Android) and it opens in its own window without the browser bar, with a proper icon on both. Long-press the icon on Android for shortcuts to Gear, Setlists and the Tuner. There's no offline mode on purpose: your data lives on your server, and caching pages on the phone would risk showing stale gear after an update.
 - **Multi-user** - admin plus member accounts, everyone with their own login. Each signed-in user can change their own password in Settings > Change password. The current password is required; other signed-in devices are signed out after a change. Administrators can still reset another user's password from Settings > Users. Passwords use salted PBKDF2-HMAC-SHA256, not plain text.
-- **Token API** - per-user API tokens and interactive docs at `/api/docs`, so you can log a restring or read your collection from anywhere: a script, a shortcut, or an AI assistant. The website sign-in also accepts an existing token instead of a username and password. Admins can turn off token sign-in under Settings > Features without disabling the API.
+- **Token API** - per-user API tokens and interactive docs at `/api/docs`, so you can log a restring or read your collection from anywhere: a script, a shortcut, or an AI assistant. The website sign-in also accepts an existing token in the password field with the username left blank, without showing a token option on the page. Admins can turn off token sign-in under Settings > Features without disabling the API.
 
 ## Run it
 
@@ -146,13 +146,14 @@ Settings > Notifications takes any [Apprise](https://github.com/caronc/apprise) 
 
 Settings > API tokens creates a token that acts as you over the REST API. Interactive docs (with a "try it" button) are at `/api/docs`; the OpenAPI spec is at `/api/v1/openapi.json`.
 
-To use a token in the website, choose **API token** on the sign-in page and paste the token into the masked field. No username is needed. It signs in as the token's owner with the same 30-day session as a password sign-in. Revoked tokens and deactivated users cannot start new sessions; sessions already signed in stay active until logout or expiry. Turn off **Sign in with an API token** in Settings > Features to remove this sign-in option while keeping the API available. Keep tokens secret, use HTTPS, and do not put them in URLs.
+The sign-in page does not advertise tokens. To use an existing token on the website, leave **Username** empty and put the token in the masked **Password** field. It signs in as the token's owner with the same 30-day session as a password sign-in. Revoked tokens and deactivated users cannot start new sessions; sessions already signed in stay active until logout or expiry. Turn off **Sign in with an API token** in Settings > Features to disable token sign-in while keeping the API available. Keep tokens secret, use HTTPS, and do not put them in URLs.
 
-To connect an AI assistant, paste it something like this, with your own URL and token filled in:
+To connect an AI assistant, use this prompt with your own URL. Provide the token separately through a secure credential store, never in a prompt:
 
 ```
 You can manage my guitar gear through the Gearsmith API at https://YOUR-URL-HERE.
-Authenticate every request with the header: Authorization: Bearer YOUR-TOKEN-HERE
+Authenticate every request using my token from the secure credential store in the header: Authorization: Bearer <GEARSMITH_API_TOKEN>
+For website sign-in, leave Username blank and put that token in the masked Password field. Token sign-in is not shown on the page. Never put the token in a URL, source file, prompt, or log.
 The interactive docs are at /api/docs and the OpenAPI spec at /api/v1/openapi.json.
 Gear: list and add (GET/POST /api/v1/gear, filter the list with ?type=guitar, amp, pedal, pick
 or strings, ?lifecycle=owned, want or sold, and ?q= to search names and specs), read one item (GET /api/v1/gear/{id}), update it (PATCH /api/v1/gear/{id}). Every item

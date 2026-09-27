@@ -1555,3 +1555,42 @@ def test_token_sign_in_uses_owner_session_and_shared_login_limit(tmp_path, monke
         assert visitor.post('/api/login', json={'token': token}).status_code == 401
         assert visitor.get('/api/me').status_code == 200  # existing session unaffected
         assert token not in visitor.post('/api/login', json={'token': token}).text
+
+
+def test_artist_preset_setting_photos_and_cleanup(tmp_path):
+    fresh(tmp_path)
+    photo = b"\xff\xd8\xff" + b"preset setting photo" * 80
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        token = c.post("/api/tokens", json={"name": "preset-rig"}).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        preset = c.post("/api/v1/presets", headers=auth, json={
+            "name": "Artist tone", "artist": "Example band",
+            "rig": [{"gear_name": "Fuzzy Cream", "knobs": [{"name": "Sustain", "value": "2:00"}]}],
+        }).json()
+        pid = preset["id"]
+        setting = preset["rig"][0]["id"]
+        url = f"/api/v1/presets/{pid}/rig/{setting}/photos"
+        assert c.post(url, files={"photo": ("a.jpg", photo, "image/jpeg")}).status_code == 401
+        assert c.post(f"/api/v1/presets/{pid + 999}/rig/{setting}/photos", headers=auth,
+                      files={"photo": ("a.jpg", photo, "image/jpeg")}).status_code == 404
+        assert c.post(url, headers=auth, files={"photo": ("invalid.jpg", b"garbage", "image/jpeg")}).status_code == 400
+        attached = c.post(url, headers=auth, files={"photo": ("a.jpg", photo, "image/jpeg")})
+        assert attached.status_code == 201
+        uploaded = attached.json()
+        assert c.get(f"/api/v1/presets/{pid}", headers=auth).json()["rig"][0]["photos"] == [uploaded]
+        assert c.get(uploaded["url"]).content == photo
+        assert "/api/v1/presets/{preset_id}/rig/{setting_id}/photos" in c.get("/api/v1/openapi.json").json()["paths"]
+        main.init_db()  # an upgrade preserves the association
+        assert c.get(f"/api/v1/presets/{pid}", headers=auth).json()["rig"][0]["photos"] == [uploaded]
+        assert c.delete(f"/api/v1/preset-rig-photos/{uploaded['id']}", headers=auth).status_code == 200
+        assert c.get(uploaded["url"]).status_code == 404
+        uploaded = c.post(url, headers=auth, files={"photo": ("a.jpg", photo, "image/jpeg")}).json()
+        assert c.patch(f"/api/v1/presets/{pid}", headers=auth,
+                       json={"rig": [{"gear_name": "Fuzzy Cream"}]}).status_code == 200
+        assert c.get(uploaded["url"]).status_code == 404
+        setting = c.get(f"/api/v1/presets/{pid}", headers=auth).json()["rig"][0]["id"]
+        uploaded = c.post(f"/api/v1/presets/{pid}/rig/{setting}/photos", headers=auth,
+                          files={"photo": ("a.jpg", photo, "image/jpeg")}).json()
+        assert c.delete(f"/api/v1/presets/{pid}", headers=auth).status_code == 200
+        assert c.get(uploaded["url"]).status_code == 404

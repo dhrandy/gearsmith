@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.7.2"
+APP_VERSION = "0.8.0"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -429,6 +429,14 @@ def init_db() -> None:
           created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_rig_photos ON rig_photos(setting_id, sort);
+        CREATE TABLE IF NOT EXISTS preset_rig_photos (
+          id INTEGER PRIMARY KEY,
+          setting_id INTEGER NOT NULL REFERENCES preset_gear_settings(id) ON DELETE CASCADE,
+          filename TEXT NOT NULL,
+          sort INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_preset_rig_photos ON preset_rig_photos(setting_id, sort);
         CREATE TABLE IF NOT EXISTS preset_gear_settings (
           id INTEGER PRIMARY KEY,
           preset_id INTEGER NOT NULL REFERENCES presets(id) ON DELETE CASCADE,
@@ -2522,7 +2530,7 @@ def get_song_row(c, song_id: int):
     return row
 
 
-def rig_dict(row, c=None) -> dict[str, Any]:
+def rig_dict(row, c=None, o: Owner = SONG) -> dict[str, Any]:
     return {
         "id": row["id"],
         "gear_id": row["gear_id"],
@@ -2531,7 +2539,7 @@ def rig_dict(row, c=None) -> dict[str, Any]:
         "engaged": row["engaged"],
         "knobs": json.loads(row["knobs"] or "[]"),
         "note": row["note"],
-        "photos": owner_photo_list(c, "rig", row["id"]) if c else [],
+        "photos": owner_photo_list(c, "preset_rig" if o == PRESET else "rig", row["id"]) if c else [],
     }
 
 
@@ -2569,6 +2577,7 @@ def patch_dict(c, row, o: Owner = SONG) -> dict[str, Any]:
 PHOTO_OWNERS = {
     "preset": ("preset_photos", "preset_id", "presets"),
     "rig": ("rig_photos", "setting_id", "song_gear_settings"),
+    "preset_rig": ("preset_rig_photos", "setting_id", "preset_gear_settings"),
 }
 
 
@@ -2601,6 +2610,9 @@ async def attach_owner_photo(c, kind: str, owner_id: int, file: UploadFile) -> d
         raise
     if kind == "preset":
         c.execute("UPDATE presets SET updated_at=? WHERE id=?", (now_iso(), owner_id))
+    elif kind == "preset_rig":
+        row = c.execute("SELECT preset_id FROM preset_gear_settings WHERE id=?", (owner_id,)).fetchone()
+        c.execute("UPDATE presets SET updated_at=? WHERE id=?", (now_iso(), row["preset_id"]))
     else:
         row = c.execute("SELECT song_id FROM song_gear_settings WHERE id=?", (owner_id,)).fetchone()
         touch_song(c, row["song_id"])
@@ -2615,6 +2627,10 @@ def remove_owner_photo(c, kind: str, photo_id: int) -> dict[str, bool]:
     c.execute(f"DELETE FROM {table} WHERE id=?", (photo_id,))
     if kind == "preset":
         c.execute("UPDATE presets SET updated_at=? WHERE id=?", (now_iso(), row[column]))
+    elif kind == "preset_rig":
+        owner = c.execute("SELECT preset_id FROM preset_gear_settings WHERE id=?", (row[column],)).fetchone()
+        if owner:
+            c.execute("UPDATE presets SET updated_at=? WHERE id=?", (now_iso(), owner["preset_id"]))
     else:
         song = c.execute("SELECT song_id FROM song_gear_settings WHERE id=?", (row[column],)).fetchone()
         if song:
@@ -2668,7 +2684,7 @@ def chain_of(c, owner_id: int, o: Owner) -> tuple[list[dict[str, Any]], list[dic
     patches = c.execute(
         f"SELECT * FROM {o.patches} WHERE {o.col}=? ORDER BY position, id", (owner_id,)
     ).fetchall()
-    return [rig_dict(r, c if o == SONG else None) for r in rig], [patch_dict(c, p, o) for p in patches]
+    return [rig_dict(r, c, o) for r in rig], [patch_dict(c, p, o) for p in patches]
 
 
 def song_dict(c, row) -> dict[str, Any]:
@@ -2743,9 +2759,9 @@ def insert_patch(c, owner_id: int, item: PatchIn, position: int, o: Owner = SONG
 
 
 def replace_rig(c, owner_id: int, rig: list[RigSettingIn], o: Owner = SONG) -> None:
-    if o == SONG:
-        for row in c.execute("SELECT id FROM song_gear_settings WHERE song_id=?", (owner_id,)):
-            unlink_owner_photos(c, "rig", row["id"])
+    photo_kind = "rig" if o == SONG else "preset_rig"
+    for row in c.execute(f"SELECT id FROM {o.rig} WHERE {o.col}=?", (owner_id,)):
+        unlink_owner_photos(c, photo_kind, row["id"])
     c.execute(f"DELETE FROM {o.rig} WHERE {o.col}=?", (owner_id,))
     for pos, item in enumerate(rig):
         insert_rig_setting(c, owner_id, item, pos, o)
@@ -3270,6 +3286,21 @@ def register_preset_routes(prefix: str, auth, v1: bool) -> None:
         with db() as c:
             return await attach_owner_photo(c, "preset", preset_id, photo)
 
+    @route("post", "/presets/{preset_id}/rig/{setting_id}/photos",
+           "Attach a photo to one setting in a preset", status_code=201)
+    async def _preset_rig_photo_add(preset_id: int, setting_id: int, request: Request, photo: UploadFile = File(...)):
+        auth(request)
+        with db() as c:
+            if not c.execute("SELECT id FROM preset_gear_settings WHERE id=? AND preset_id=?", (setting_id, preset_id)).fetchone():
+                raise HTTPException(404, "Preset rig entry not found")
+            return await attach_owner_photo(c, "preset_rig", setting_id, photo)
+
+    @route("delete", "/preset-rig-photos/{photo_id}", "Delete a preset setting photo")
+    def _preset_rig_photo_delete(photo_id: int, request: Request):
+        auth(request)
+        with db() as c:
+            return remove_owner_photo(c, "preset_rig", photo_id)
+
     @route("delete", "/preset-photos/{photo_id}", "Delete a preset photo")
     def _photo_delete(photo_id: int, request: Request):
         auth(request)
@@ -3282,6 +3313,8 @@ def register_preset_routes(prefix: str, auth, v1: bool) -> None:
         with db() as c:
             get_preset_row(c, preset_id)
             unlink_owner_photos(c, "preset", preset_id)
+            for setting in c.execute("SELECT id FROM preset_gear_settings WHERE preset_id=?", (preset_id,)):
+                unlink_owner_photos(c, "preset_rig", setting["id"])
             c.execute("DELETE FROM presets WHERE id=?", (preset_id,))
             return {"ok": True}
 

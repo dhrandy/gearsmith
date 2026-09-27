@@ -1370,7 +1370,7 @@ function knobText(knobs) {
 const gearLink = (gid, name) => (gid ? `<a href="#/gear/${gid}">${esc(name)}</a>` : esc(name));
 const setLink = (sid, name) => (sid && featureOn("feature_sets") ? `<a href="#/sets/${sid}">${esc(name)}</a>` : esc(name));
 
-function chainHtml(rig, songId = null) {
+function chainHtml(rig, owner = null) {
   return `<ol class="chain">
       ${rig.map((r) => `
         <li class="chain-item${r.engaged === "off" ? " off" : ""}">
@@ -1380,7 +1380,7 @@ function chainHtml(rig, songId = null) {
           </div>
           ${r.knobs.length ? `<div class="knobs">${knobText(r.knobs)}</div>` : ""}
           ${r.note ? `<p class="notes muted">${esc(r.note)}</p>` : ""}
-          ${songId && featureOn("feature_setting_photos") ? `
+          ${owner && featureOn("feature_setting_photos") ? `
             <div class="setting-photos">
               ${(r.photos || []).map((photo) => `<div class="setting-photo">
                 <a href="${esc(photo.url)}" data-lightbox aria-label="Open photo of ${esc(r.gear_name)}">
@@ -1441,7 +1441,11 @@ async function artistsView() {
       return `
       <section class="artist-group">
         <h2 class="wrap-any">${g.artist ? esc(g.artist) : "No artist"} <span class="muted count">${counts}</span></h2>
-        <div class="grid">${g.songs.map(songCard).join("")}${g.presets.map(presetCard).join("")}</div>
+        ${g.songs.length ? `<div class="grid">${g.songs.map(songCard).join("")}</div>` : ""}
+        ${g.presets.length ? `<details class="artist-presets">
+          <summary>Presets <span class="muted count">${g.preset_count}</span></summary>
+          <div class="grid">${g.presets.map(presetCard).join("")}</div>
+        </details>` : ""}
       </section>`;
     }).join("") || `<p class="empty">${groups.length ? "Nothing matches." : "No songs yet. Add one with an artist and it shows up here."}</p>`;
   }
@@ -1485,7 +1489,7 @@ async function presetDetailView(id) {
     ${p.artist ? `<p class="muted wrap-any" style="margin-top:0">${esc(p.artist)}</p>` : ""}
     ${p.amp_name ? `<div class="facts recall-facts"><div class="fact"><span>Amp</span>${gearLink(p.amp_id, p.amp_name)}</div></div>` : ""}
     <h2>Signal chain</h2>
-    ${p.rig.length ? chainHtml(p.rig) : `<p class="muted">No gear settings in this preset.</p>`}
+    ${p.rig.length ? chainHtml(p.rig, { kind: "preset", id: p.id }) : `<p class="muted">No gear settings in this preset.</p>`}
     ${featureOn("feature_setting_photos") ? `<h2>Setting photos</h2>
       <div class="card">
         <div class="setting-photos">${p.photos.map((photo) => `<div class="setting-photo">
@@ -1517,6 +1521,22 @@ async function presetDetailView(id) {
       presetDetailView(id);
     } catch (error) { toast(error.message); }
   });
+  view.querySelectorAll("[data-rig-photo-upload]").forEach((form) => form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const data = new FormData();
+    data.append("photo", form.querySelector('input[type="file"]').files[0]);
+    try {
+      await api(`/api/presets/${id}/rig/${form.dataset.rigPhotoUpload}/photos`, { method: "POST", body: data });
+      toast("Setting photo added");
+      presetDetailView(id);
+    } catch (error) { toast(error.message); }
+  }));
+  view.querySelectorAll("[data-rig-photo-delete]").forEach((button) => button.addEventListener("click", async () => {
+    try {
+      await api(`/api/preset-rig-photos/${button.dataset.rigPhotoDelete}`, { method: "DELETE" });
+      presetDetailView(id);
+    } catch (error) { toast(error.message); }
+  }));
   view.querySelectorAll("[data-preset-photo-delete]").forEach((button) => button.addEventListener("click", async () => {
     await api(`/api/preset-photos/${button.dataset.presetPhotoDelete}`, { method: "DELETE" });
     presetDetailView(id);
@@ -1803,7 +1823,7 @@ async function songDetailView(id) {
         </div>`).join("")}
     </div>` : ""}
     ${s.rig.length || !s.presets.length ? `<h2>${s.presets.length ? "Song's own settings" : "Signal chain"}</h2>` : ""}
-    ${s.rig.length ? chainHtml(s.rig, s.id) : (s.presets.length ? "" : `<p class="muted">No gear settings saved for this song.</p>`)}
+    ${s.rig.length ? chainHtml(s.rig, { kind: "song", id: s.id }) : (s.presets.length ? "" : `<p class="muted">No gear settings saved for this song.</p>`)}
     ${s.patches.length ? `<h2>Patches</h2>${patchesHtml(s.patches)}` : ""}
     ${s.notes ? `<h2>Notes</h2><p class="notes wrap-any">${esc(s.notes)}</p>` : ""}
     <h2>Photos</h2>

@@ -528,6 +528,7 @@ def test_presets_follow_songs_and_artist_view(app_url, width, height):
         expect(groups).to_have_count(2)
         band = page.locator(".artist-group", has_text="Test Band")
         expect(band.locator(".song-card", has_text="Preset Song")).to_be_visible()
+        band.locator("details.artist-presets summary").click()
         expect(band.locator(".preset-card", has_text="Test Crunch")).to_be_visible()
         expect(band.locator("h2")).to_contain_text("1 song · 1 preset")
         assert_no_overflow(page, "artists view")
@@ -728,6 +729,7 @@ def test_preset_cards_show_rig_tag_and_chain(app_url, width, height):
         }).ok
 
         page.goto(app_url + "/#/songs/artists")
+        page.locator(".artist-group", has_text="Dexter and The Moonrocks").locator("details.artist-presets summary").click()
         card = page.locator(".preset-card", has_text="Ampero Mini")
         expect(card.locator(".gc-name")).to_have_text("Dexter and The Moonrocks Extended Long Title")
         expect(card.locator(".rig-tag")).to_have_text("Ampero Mini")
@@ -1284,7 +1286,9 @@ def test_preset_photo_visible_from_artist_card_and_settings(app_url, width, heig
         page = browser.new_page(viewport={"width": width, "height": height})
         sign_in(page, app_url)
         page.goto(app_url + "/#/songs/artists")
-        card = page.locator(".artist-group .preset-card", has_text="Compact board")
+        group = page.locator(".artist-group", has_text="Example band")
+        group.locator("details.artist-presets summary").click()
+        card = group.locator(".preset-card", has_text="Compact board")
         thumbnail = card.locator(".thumb img")
         expect(thumbnail).to_be_visible()
         assert thumbnail.evaluate("img => img.naturalWidth > 0")
@@ -1330,4 +1334,51 @@ def test_token_sign_in_on_desktop_and_mobile(app_url, width, height):
         page.reload()
         expect(page.get_by_role('button', name='API token')).to_have_count(0)
         expect(page.locator('#username-field')).to_be_visible()
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1440, 900), (390, 844)])
+def test_artist_preset_groups_and_setting_photo(app_url, width, height):
+    import base64
+
+    photo = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4/5+hHgAHggJ/P4wW2QAAAABJRU5ErkJggg==")
+    with httpx.Client(base_url=app_url) as client:
+        assert client.post("/api/setup", json={"username": "admin-test", "password": "password-123"}).status_code == 200
+        preset = client.post("/api/presets", json={"name": "Artist crunch", "artist": "Example band",
+                                                      "rig": [{"gear_name": "Fuzzy Cream"}]}).json()
+        setting = preset["rig"][0]
+        image = client.post(f"/api/presets/{preset['id']}/rig/{setting['id']}/photos",
+                            files={"photo": ("setting.png", photo, "image/png")}).json()
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        page.goto(app_url + "/#/songs/artists")
+        group = page.locator(".artist-group", has_text="Example band")
+        details = group.locator("details.artist-presets")
+        expect(details).not_to_have_attribute("open", "")
+        expect(group.get_by_role("link", name="Artist crunch")).not_to_be_visible()
+        details.locator("summary").click()
+        expect(group.get_by_role("link", name="Artist crunch")).to_be_visible()
+        details.locator("summary").click()
+        expect(group.get_by_role("link", name="Artist crunch")).not_to_be_visible()
+        details.locator("summary").click()
+        group.get_by_role("link", name="Artist crunch").click()
+        setting_photo = page.locator(".chain-item .setting-photo a")
+        expect(setting_photo).to_be_visible()
+        assert setting_photo.get_attribute("href") == image["url"]
+        setting_photo.click()
+        expect(page.locator("#lightbox")).to_be_visible()
+        page.keyboard.press("Escape")
+        photo_input = page.locator(".chain-item [data-rig-photo-upload] input[type=file]")
+        photo_input.set_input_files({"name": "another.png", "mimeType": "image/png", "buffer": photo})
+        page.locator(".chain-item [data-rig-photo-upload] button").click()
+        expect(page.locator(".chain-item .setting-photo")).to_have_count(2)
+        page.locator(".chain-item .setting-photo button").last.click()
+        expect(page.locator(".chain-item .setting-photo")).to_have_count(1)
+        page.goto(app_url + "/#/settings")
+        page.locator('[data-feature="feature_setting_photos"]').uncheck()
+        page.goto(app_url + f"/#/presets/{preset['id']}")
+        expect(page.locator(".chain-item .setting-photo")).to_have_count(0)
+        assert not page.evaluate("document.documentElement.scrollWidth > innerWidth")
         browser.close()

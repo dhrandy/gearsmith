@@ -1156,6 +1156,9 @@ def test_price_paid_value_and_collection_total(app_url, width, height):
         page.wait_for_timeout(2700)
         page.screenshot(path=f"/tmp/values-toggle-settings-{width}.png", full_page=True)
         page.locator("[data-feature=feature_values]").check()
+        # The checkbox change saves asynchronously; wait for the server-backed update
+        # before leaving Settings or a reload can still see the previous setting.
+        expect(page.get_by_text("Values shown")).to_be_visible()
         page.goto(app_url + "/#/")
         expect(page.locator("#collection-total")).to_contain_text("$1,150")
         browser.close()

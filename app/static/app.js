@@ -1354,14 +1354,17 @@ function dialAngle(value) {
   return null;
 }
 
-function knobText(knobs) {
-  return knobs.filter((k) => k.name).map((k) => {
+// orderEntry: a song rig entry id adds arrows that reorder the knobs right on the song page.
+function knobText(knobs, orderEntry = null) {
+  const named = knobs.filter((k) => k.name);
+  return named.map((k, j) => {
     const label = `<span>${esc(k.name)}</span>${esc(k.value || "-")}`;
+    const order = orderEntry === null ? "" : `<span class="knob-order"><button class="small ghost" type="button" data-kord-up="${orderEntry}:${j}" aria-label="Move ${esc(k.name)} earlier" ${j === 0 ? "disabled" : ""}>↑</button><button class="small ghost" type="button" data-kord-down="${orderEntry}:${j}" aria-label="Move ${esc(k.name)} later" ${j === named.length - 1 ? "disabled" : ""}>↓</button></span>`;
     const angle = featureOn("feature_dials") ? dialAngle(k.value) : null;
-    if (angle === null) return `<span class="knob">${label}</span>`;
+    if (angle === null) return `<span class="knob">${label}${order}</span>`;
     const ticks = [-150, -120, -90, -60, -30, 0, 30, 60, 90, 120, 150]
       .map((a) => `<line x1="36" y1="2" x2="36" y2="6" transform="rotate(${a} 36 36)" class="dial-tick"/>`).join("");
-    return `<span class="knob knob-visual"><svg class="dial" viewBox="0 0 72 72" role="img" aria-label="${esc(k.name)}: ${esc(k.value)}"><circle cx="36" cy="36" r="30" class="dial-rim"/>${ticks}<circle cx="36" cy="36" r="24" class="dial-face"/><line x1="36" y1="13" x2="36" y2="30" transform="rotate(${angle} 36 36)" class="dial-pointer"/><circle cx="36" cy="36" r="3" class="dial-hub"/></svg><span class="knob-label">${label}</span></span>`;
+    return `<span class="knob knob-visual"><svg class="dial" viewBox="0 0 72 72" role="img" aria-label="${esc(k.name)}: ${esc(k.value)}"><circle cx="36" cy="36" r="30" class="dial-rim"/>${ticks}<circle cx="36" cy="36" r="24" class="dial-face"/><line x1="36" y1="13" x2="36" y2="30" transform="rotate(${angle} 36 36)" class="dial-pointer"/><circle cx="36" cy="36" r="3" class="dial-hub"/></svg><span class="knob-label">${label}</span>${order}</span>`;
   }).join("");
 }
 
@@ -1376,7 +1379,7 @@ function chainHtml(rig, owner = null) {
             <strong class="wrap-any">${gearLink(r.gear_id, r.gear_name)}</strong>
             <span class="engaged eng-${esc(r.engaged)}">${ENGAGED_LABEL[r.engaged] || esc(r.engaged)}</span>
           </div>
-          ${r.knobs.length ? `<div class="knobs">${knobText(r.knobs)}</div>` : ""}
+          ${r.knobs.length ? `<div class="knobs">${knobText(r.knobs, owner && owner.kind === "song" ? r.id : null)}</div>` : ""}
           ${r.note ? `<p class="notes muted">${esc(r.note)}</p>` : ""}
           ${owner && featureOn("feature_setting_photos") ? `
             <div class="setting-photos">
@@ -1913,6 +1916,21 @@ async function songDetailView(id) {
   view.querySelectorAll("[data-sdelphoto]").forEach((b) => b.addEventListener("click", async () => {
     await api(`/api/song-photos/${b.dataset.sdelphoto}`, { method: "DELETE" });
     songDetailView(id);
+  }));
+  view.querySelectorAll("[data-kord-up],[data-kord-down]").forEach((b) => b.addEventListener("click", async () => {
+    const dir = b.dataset.kordUp !== undefined ? "up" : "down";
+    const [entryId, j] = (dir === "up" ? b.dataset.kordUp : b.dataset.kordDown).split(":").map(Number);
+    const entry = s.rig.find((r) => r.id === entryId);
+    const target = j + (dir === "up" ? -1 : 1);
+    if (!entry || target < 0 || target >= entry.knobs.length) return;
+    const knobs = entry.knobs.map((k) => ({ name: k.name, value: k.value }));
+    [knobs[j], knobs[target]] = [knobs[target], knobs[j]];
+    try {
+      await api(`/api/songs/${id}/rig/${entryId}`, { method: "PATCH", body: { knobs } });
+      toast("Knob order saved");
+      await songDetailView(id);
+      view.querySelector(`[data-kord-${dir}="${entryId}:${target}"]`)?.focus();
+    } catch (ex) { toast(ex.message); }
   }));
 }
 

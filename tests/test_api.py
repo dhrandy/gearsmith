@@ -1638,3 +1638,20 @@ def test_song_tab_url_validation_round_trip_and_migration(tmp_path):
         assert "tab_url" in {r["name"] for r in conn.execute("PRAGMA table_info(songs)")}
         main.migrate(conn)
         assert "tab_url" in {r["name"] for r in conn.execute("PRAGMA table_info(songs)")}
+
+
+def test_rig_entry_knob_reorder(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        knobs = [{"name": "Gain", "value": "9:30"}, {"name": "Treble", "value": "noon"}, {"name": "Level", "value": "7"}]
+        song = c.post("/api/songs", json={"title": "Reorder", "rig": [{"gear_name": "Amp", "knobs": knobs, "engaged": "off", "note": "keep me"}]}).json()
+        entry = c.get(f"/api/songs/{song['id']}").json()["rig"][0]
+        moved = [knobs[1], knobs[0], knobs[2]]
+        r = c.patch(f"/api/songs/{song['id']}/rig/{entry['id']}", json={"knobs": moved})
+        assert r.status_code == 200
+        assert r.json()["knobs"] == moved
+        after = c.get(f"/api/songs/{song['id']}").json()["rig"][0]
+        assert after["knobs"] == moved
+        assert after["engaged"] == "off"
+        assert after["note"] == "keep me"

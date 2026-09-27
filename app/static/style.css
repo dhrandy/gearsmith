@@ -349,6 +349,9 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent2); b
 .knob-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto; gap: 6px; align-items: center; }
 .knob-order { display: flex; gap: 2px; }
 .knob-order button { min-width: 34px; padding-inline: 6px; }
+/* Reorder arrows under a control on the song page stay inside the chip, even at 280px. */
+.knob .knob-order { justify-content: center; margin-top: 5px; }
+.knob .knob-order button { min-width: 32px; min-height: 30px; padding-inline: 4px; }
 .form-grid.tight { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .block-edit { border: 1px solid var(--line); border-radius: 12px; padding: 10px; display: grid; gap: 8px; }
 .block-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto; gap: 6px; align-items: center; }

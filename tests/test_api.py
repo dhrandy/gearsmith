@@ -1598,3 +1598,19 @@ def test_artist_preset_setting_photos_and_cleanup(tmp_path):
                           files={"photo": ("a.jpg", photo, "image/jpeg")}).json()
         assert c.delete(f"/api/v1/presets/{pid}", headers=auth).status_code == 200
         assert c.get(uploaded["url"]).status_code == 404
+
+
+def test_dials_feature_and_rig_order_round_trip(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        assert c.get("/api/settings").json()["feature_dials"] is True
+        assert c.put("/api/settings", json={"feature_dials": False}).json()["feature_dials"] is False
+        assert c.get("/api/settings").json()["feature_dials"] is False
+        assert c.put("/api/settings", json={"feature_dials": True}).json()["feature_dials"] is True
+        knobs = [{"name": "Mix", "value": "8:30"}, {"name": "Regen", "value": "9:30"}]
+        song = c.post("/api/songs", json={"title": "Order test", "rig": [{"gear_name": "Delay", "knobs": knobs}]}).json()
+        assert c.get(f"/api/songs/{song['id']}").json()["rig"][0]["knobs"] == knobs
+        knobs.reverse()
+        assert c.patch(f"/api/songs/{song['id']}", json={"rig": [{"gear_name": "Delay", "knobs": knobs}]}).status_code == 200
+        assert c.get(f"/api/songs/{song['id']}").json()["rig"][0]["knobs"] == knobs

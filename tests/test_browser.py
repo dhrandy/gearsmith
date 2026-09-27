@@ -1384,3 +1384,50 @@ def test_artist_preset_groups_and_setting_photo(app_url, width, height):
         expect(page.locator(".chain-item .setting-photo")).to_have_count(0)
         assert not page.evaluate("document.documentElement.scrollWidth > innerWidth")
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1280, 900), (390, 844), (320, 720), (280, 653)])
+def test_visual_dials_order_and_fallback(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        song = req.post(app_url + "/api/songs", data={
+            "title": "Dial test", "rig": [{"gear_name": "Test amp", "knobs": [
+                {"name": "Gain", "value": "9:30"}, {"name": "Treble", "value": "noon"},
+                {"name": "Middle", "value": "1:00"}, {"name": "Level", "value": "around unity"},
+                {"name": "Master", "value": "to room volume"}]}]}).json()
+        page.goto(app_url + f"/#/songs/{song['id']}")
+        card = page.locator(".chain-item").first
+        expect(card.locator(".knob-visual")).to_have_count(3)
+        expect(card.locator(".knob:not(.knob-visual)")).to_have_count(2)
+        assert [card.locator(".dial-pointer").nth(i).get_attribute("transform") for i in range(3)] == [
+            "rotate(-75 36 36)", "rotate(0 36 36)", "rotate(30 36 36)"]
+        assert_no_overflow(page, "dial recall")
+        if width == 390:
+            page.screenshot(path="tests/screenshots/dial-recall-phone.png", full_page=True)
+        if width in (320, 280):
+            page.screenshot(path=f"tests/screenshots/dial-recall-cover-{width}.png", full_page=True)
+        if width == 1280:
+            page.screenshot(path="tests/screenshots/dial-recall-desktop.png", full_page=True)
+        page.get_by_role("link", name="Edit", exact=True).click()
+        expect(page.locator("[data-r-kname^='0:']")).to_have_count(5)
+        assert_no_overflow(page, "dial editor")
+        if width in (280, 320, 390):
+            page.screenshot(path=f"tests/screenshots/dial-editor-{width}.png", full_page=True)
+        page.get_by_role("button", name="Move Treble earlier").click()
+        assert page.locator("[data-r-kname='0:0']").input_value() == "Treble"
+        with page.expect_response(lambda r: r.request.method == "PATCH" and r.url.endswith(f"/api/songs/{song['id']}")):
+            page.get_by_role("button", name="Save song").click()
+        expect(page.get_by_role("heading", name="Dial test")).to_be_visible()
+        assert [x["name"] for x in req.get(app_url + f"/api/songs/{song['id']}").json()["rig"][0]["knobs"]][:2] == ["Treble", "Gain"]
+        expect(card.locator(".knob").first).to_contain_text("Treble")
+        page.goto(app_url + "/#/settings")
+        page.locator("[data-feature=feature_dials]").uncheck()
+        page.goto(app_url + f"/#/songs/{song['id']}")
+        expect(page.locator(".chain-item .knob-visual")).to_have_count(0)
+        expect(page.locator(".chain-item .knob")).to_have_count(5)
+        expect(page.locator(".chain-item .knob").first).to_contain_text("noon")
+        assert_no_overflow(page, "text fallback")
+        browser.close()

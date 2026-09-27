@@ -1335,8 +1335,34 @@ async function songsView() {
   search.addEventListener("input", render);
 }
 
+// O'clock positions are literal clock angles. Numeric 0-10 values use a separate
+// schematic sweep from 7 to 5 o'clock; everything else stays exact text.
+function dialAngle(value) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (raw === "noon" || raw === "12" || raw === "12:00") return 0;
+  const clock = raw.match(/^(1[0-2]|[1-9]):(00|30)$/);
+  if (clock) {
+    const degrees = ((Number(clock[1]) % 12) * 60 + Number(clock[2])) / 2;
+    return degrees > 180 ? degrees - 360 : degrees;
+  }
+  const numeric = raw.match(/^(?:around |about )?(10|[0-9])(?:\.([0-9]))?(?:\s*[-–]\s*(10|[0-9]))?$/);
+  if (numeric) {
+    const first = Number(numeric[1] + (numeric[2] ? "." + numeric[2] : ""));
+    const last = numeric[3] === undefined ? first : Number(numeric[3]);
+    if (first <= 10 && last >= first) return -150 + ((first + last) / 2) * 30;
+  }
+  return null;
+}
+
 function knobText(knobs) {
-  return knobs.filter((k) => k.name).map((k) => `<span class="knob"><span>${esc(k.name)}</span>${esc(k.value || "-")}</span>`).join("");
+  return knobs.filter((k) => k.name).map((k) => {
+    const label = `<span>${esc(k.name)}</span>${esc(k.value || "-")}`;
+    const angle = featureOn("feature_dials") ? dialAngle(k.value) : null;
+    if (angle === null) return `<span class="knob">${label}</span>`;
+    const ticks = [-150, -120, -90, -60, -30, 0, 30, 60, 90, 120, 150]
+      .map((a) => `<line x1="36" y1="2" x2="36" y2="6" transform="rotate(${a} 36 36)" class="dial-tick"/>`).join("");
+    return `<span class="knob knob-visual"><svg class="dial" viewBox="0 0 72 72" role="img" aria-label="${esc(k.name)}: ${esc(k.value)}"><circle cx="36" cy="36" r="30" class="dial-rim"/>${ticks}<circle cx="36" cy="36" r="24" class="dial-face"/><line x1="36" y1="13" x2="36" y2="30" transform="rotate(${angle} 36 36)" class="dial-pointer"/><circle cx="36" cy="36" r="3" class="dial-hub"/></svg><span class="knob-label">${label}</span></span>`;
+  }).join("");
 }
 
 const gearLink = (gid, name) => (gid ? `<a href="#/gear/${gid}">${esc(name)}</a>` : esc(name));
@@ -1955,6 +1981,7 @@ async function songEditorView(id, kind = "song") {
       <div class="knob-row">
         <input data-${prefix}-kname="${idx}:${j}" maxlength="40" value="${esc(k.name)}" placeholder="${prefix === "b" ? "Param" : "Control"}" aria-label="Control name" />
         <input data-${prefix}-kval="${idx}:${j}" maxlength="40" value="${esc(k.value)}" placeholder="${k.kind === "switch" ? "e.g. Bright" : "e.g. 2:00, noon, 7"}" aria-label="${esc(k.name || "Control")} setting" />
+        ${prefix === "r" ? `<span class="knob-order"><button class="small ghost" type="button" data-r-kup="${idx}:${j}" aria-label="Move ${esc(k.name || "control")} earlier" ${j === 0 ? "disabled" : ""}>↑</button><button class="small ghost" type="button" data-r-kdown="${idx}:${j}" aria-label="Move ${esc(k.name || "control")} later" ${j === list.length - 1 ? "disabled" : ""}>↓</button></span>` : ""}
         <button class="small ghost danger" type="button" data-${prefix}-kdel="${idx}:${j}" aria-label="Remove ${esc(k.name || "control")}">✕</button>
       </div>`).join("");
   }
@@ -2031,7 +2058,7 @@ async function songEditorView(id, kind = "song") {
         ${isPreset ? "" : presetPicker()}
 
         <h2>${isPreset || !draft.presets.length ? "Signal chain" : "Song's own settings"}</h2>
-        <p class="hint" style="margin-top:-6px">Each piece of gear in the order the signal runs, with its settings for this ${isPreset ? "tone" : "song"}. Knob names come from the gear's controls; type the positions.</p>
+        <p class="hint" style="margin-top:-6px">Each piece of gear in signal order, with settings for this ${isPreset ? "tone" : "song"}. Use the arrows beside each control to match the knob order on your gear.</p>
         <div class="stack" id="rig-rows">
           ${draft.rig.map((r, i) => `
             <div class="card rig-row">
@@ -2179,6 +2206,16 @@ async function songEditorView(id, kind = "song") {
     $("[data-rig-note]").forEach((el) => el.addEventListener("input", () => { draft.rig[Number(el.dataset.rigNote)].note = el.value; }));
     $("[data-r-kname]").forEach((el) => el.addEventListener("input", () => { const [i, j] = pair(el.dataset.rKname); draft.rig[i].knobs[j].name = el.value; }));
     $("[data-r-kval]").forEach((el) => el.addEventListener("input", () => { const [i, j] = pair(el.dataset.rKval); draft.rig[i].knobs[j].value = el.value; }));
+    for (const direction of ["up", "down"]) {
+      $(`[data-r-k${direction}]`).forEach((b) => b.addEventListener("click", () => {
+        const [i, j] = pair(b.dataset[`rK${direction}`]);
+        const target = j + (direction === "up" ? -1 : 1);
+        if (target < 0 || target >= draft.rig[i].knobs.length) return;
+        [draft.rig[i].knobs[j], draft.rig[i].knobs[target]] = [draft.rig[i].knobs[target], draft.rig[i].knobs[j]];
+        render();
+        view.querySelector(`[data-r-k${direction}="${i}:${target}"]`)?.focus();
+      }));
+    }
     $("[data-r-kdel]").forEach((b) => b.addEventListener("click", () => { const [i, j] = pair(b.dataset.rKdel); draft.rig[i].knobs.splice(j, 1); render(); }));
     $("[data-rig-kadd]").forEach((b) => b.addEventListener("click", () => {
       const i = Number(b.dataset.rigKadd);
@@ -2643,6 +2680,7 @@ async function settingsView() {
         ["feature_sold", "Sold archive"], ["feature_tuner", "Tuner (uses the mic, runs on your device)"],
         ["feature_values", "Collection value (prices paid, current values and totals)"],
         ["feature_setting_photos", "Photos on presets and song rig settings"],
+        ["feature_dials", "Visual knob dials (show positions in song and preset settings)"],
         ["feature_token_login", "Sign in with an API token"],
       ].map(([key, label]) => `
         <label class="toggle"><input type="checkbox" data-feature="${key}" ${settings[key] ? "checked" : ""} ${isAdmin ? "" : "disabled"} /> ${label}</label>`).join("")}

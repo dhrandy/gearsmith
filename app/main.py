@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.9.1"
+APP_VERSION = "0.10.0"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -949,7 +949,7 @@ def change_password(body: PasswordChange, request: Request):
 # ---------------------------------------------------------------- optional features
 
 # Hideable sections: each gear type, sets, and the maintenance loop.
-FEATURES = ("guitars", "amps", "pedals", "picks", "strings", "sets", "maintenance", "songs", "want", "sold", "tuner", "values", "setting_photos")
+FEATURES = ("guitars", "amps", "pedals", "picks", "strings", "sets", "maintenance", "songs", "want", "sold", "tuner", "values", "setting_photos", "dials")
 FEATURE_LABELS = {
     "guitars": "Guitars section",
     "amps": "Amps section",
@@ -3672,6 +3672,7 @@ class SettingsIn(BaseModel):
     feature_tuner: bool | None = None
     feature_values: bool | None = None
     feature_setting_photos: bool | None = None
+    feature_dials: bool | None = None
     feature_token_login: bool | None = None
 
 

@@ -250,7 +250,11 @@ function route() {
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === tab));
 }
 
-window.addEventListener("hashchange", route);
+window.addEventListener("hashchange", () => {
+  // Hash routes are new pages: do not retain the scroll position of the prior view.
+  window.scrollTo(0, 0);
+  route();
+});
 
 /* ---------------------------------------------------------------- favorites */
 
@@ -717,16 +721,18 @@ async function gearDetailView(id) {
           ? `<img id="gd-photo-img" src="${g.photos[0].url}" alt="${esc(g.name)} photo" />`
           : TYPE_ICON[g.type]}</div>
         <div class="hero-photo-actions">
-          <div class="row">
-            <button class="small" id="gd-photo-add" type="button" aria-expanded="false">Upload photo</button>
-            ${g.photos.length ? `<button class="small ghost danger" id="gd-photo-del" type="button">Delete photo</button>` : ""}
+          <div class="photo-toolbar" aria-label="Photo controls">
+            <div class="photo-toolbar-row">
+              <button class="photo-icon-btn" id="gd-photo-add" type="button" aria-label="Upload photo" title="Upload photo" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V3m0 0L7 8m5-5 5 5M4 17v3h16v-3" /></svg></button>
+              ${g.photos.length ? `<button class="photo-icon-btn danger" id="gd-photo-del" type="button" aria-label="Delete photo" title="Delete photo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 4h4m4 3-1 13H7L6 7m4 3v7m4-7v7" /></svg></button>` : ""}
+              ${g.photos.length > 1 ? `<button class="photo-icon-btn" id="gd-photo-prev" type="button" aria-label="Previous photo" title="Previous photo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 5-7 7 7 7" /></svg></button>
+              <button class="photo-icon-btn" id="gd-photo-next" type="button" aria-label="Next photo" title="Next photo"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 5 7 7-7 7" /></svg></button>` : ""}
+            </div>
+            ${g.photos.length ? `<div class="photo-toolbar-row">
+              ${g.photos.length > 1 ? `<span class="muted photo-toolbar-count" id="gd-photo-count"></span>` : ""}
+              <span id="gd-photo-cover-wrap" class="photo-cover-control"></span>
+            </div>` : ""}
           </div>
-          ${g.photos.length > 1 ? `<div class="row">
-            <button class="small ghost" id="gd-photo-prev" type="button" aria-label="Previous photo">&#8249; Previous</button>
-            <span class="muted" id="gd-photo-count"></span>
-            <button class="small ghost" id="gd-photo-next" type="button" aria-label="Next photo">Next &#8250;</button>
-          </div>` : ""}
-          ${g.photos.length ? `<div class="row"><span id="gd-photo-cover-wrap"></span></div>` : ""}
           <form id="photo-form" class="row" hidden>
             <input type="file" id="photo-file" accept="image/*" required />
             <button class="small" type="submit">Upload</button>

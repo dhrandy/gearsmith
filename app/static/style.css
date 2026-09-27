@@ -546,6 +546,15 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; min-hei
   .setting-photo-form button { min-height: 44px; }
 }
 
+/* Compact photo toolbar: icon-only actions retain text labels for assistive tech. */
+.photo-toolbar { display: grid; gap: 6px; min-width: 0; }
+.photo-toolbar-row { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.photo-icon-btn { width: 42px; height: 42px; min-width: 42px; min-height: 42px; padding: 8px; background: var(--panel2); }
+.photo-icon-btn svg { display: block; width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.photo-icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.photo-toolbar-count { font-size: 12px; white-space: nowrap; }
+.photo-cover-control { white-space: nowrap; }
+.photo-cover-control .badge { vertical-align: middle; }
 /* gear photos: one at a time with arrows, tools underneath */
 /* One photo on the gear detail page: the hero is also the gallery. */
 .hero-gallery { min-width: 0; }

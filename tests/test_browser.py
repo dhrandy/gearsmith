@@ -1689,6 +1689,25 @@ def test_song_rig_display_follows_item_control_order(app_url, width, height):
         browser.close()
 
 
+@pytest.mark.parametrize("width,height", [(1440, 900), (390, 844)])
+def test_gear_navigation_starts_at_top_after_scrolling(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        assert page.evaluate("window.scrollY") > 0
+        page.get_by_role("link", name="Starling").first.click()
+        expect(page.get_by_role("heading", name="Starling", exact=True)).to_be_visible()
+        assert page.evaluate("window.scrollY") == 0
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        assert page.evaluate("window.scrollY") > 0
+        page.locator("#gd-next").click()
+        expect(page.get_by_role("heading", name="Club 20", exact=True)).to_be_visible()
+        assert page.evaluate("window.scrollY") == 0
+        browser.close()
+
+
 @pytest.mark.parametrize("width,height", [(1440, 900), (1280, 800), (390, 844), (320, 680), (280, 600)])
 def test_gear_photo_uses_single_hero_and_no_second_gallery(app_url, width, height):
     import base64

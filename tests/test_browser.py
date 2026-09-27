@@ -1689,6 +1689,29 @@ def test_song_rig_display_follows_item_control_order(app_url, width, height):
         browser.close()
 
 
+@pytest.mark.parametrize("width,height", [(1440, 900), (1280, 800), (390, 844), (320, 680), (280, 600)])
+def test_gear_photo_uses_single_hero_and_no_second_gallery(app_url, width, height):
+    import base64
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4/5+hHgAHggJ/P4wW2QAAAABJRU5ErkJggg==")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        gear = {g["name"]: g for g in page.request.get(app_url + "/api/gear").json()}
+        drive = gear["Demo Drive"]["id"]
+        assert page.request.post(app_url + f"/api/gear/{drive}/photos", multipart={
+            "photo": {"name": "portrait.png", "mimeType": "image/png", "buffer": png}
+        }).ok
+        page.goto(app_url + f"/#/gear/{drive}")
+        expect(page.locator(".hero-gallery #gd-photo-img")).to_be_visible()
+        expect(page.locator(".hero-gallery img")).to_have_count(1)
+        expect(page.get_by_role("heading", name="Photos")).to_have_count(0)
+        expect(page.get_by_role("button", name="Upload photo")).to_be_visible()
+        expect(page.get_by_role("button", name="Delete photo")).to_be_visible()
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        browser.close()
+
+
 @pytest.mark.parametrize("width,height", [(1440, 900), (390, 844)])
 def test_gear_photo_gallery_arrows_and_tools(app_url, width, height):
     import base64
@@ -1705,6 +1728,8 @@ def test_gear_photo_gallery_arrows_and_tools(app_url, width, height):
 
         page.goto(app_url + f"/#/gear/{drive}")
         img = page.locator("#gd-photo-img")
+        expect(page.locator(".hero-gallery img")).to_have_count(1)
+        expect(page.get_by_role("heading", name="Photos")).to_have_count(0)
         expect(img).to_be_visible()
         expect(page.locator("#gd-photo-count")).to_have_text("1 of 2")
         expect(page.locator("#gd-photo-cover-wrap .badge")).to_have_text("Cover")
@@ -1718,11 +1743,12 @@ def test_gear_photo_gallery_arrows_and_tools(app_url, width, height):
 
         # upload is collapsed until Add photo opens it
         expect(page.locator("#photo-form")).to_be_hidden()
-        page.get_by_role("button", name="Add photo").click()
+        page.get_by_role("button", name="Upload photo").click()
         expect(page.locator("#photo-form")).to_be_visible()
 
         # delete acts on the photo on screen
         page.locator("#gd-photo-del").click()
-        expect(page.locator("#gd-photo-count")).to_have_text("1 of 1")
+        expect(page.locator("#gd-photo-count")).to_have_count(0)
+        expect(page.locator(".hero-gallery img")).to_have_count(1)
         assert req.get(app_url + f"/api/gear/{drive}").json()["photos"].__len__() == 1
         browser.close()

@@ -712,7 +712,27 @@ async function gearDetailView(id) {
     ${g.lifecycle === "want" ? `<div class="life-banner want">On your want list${money && g.want_price != null ? ` · want price ${esc(fmtPrice(g.want_price))}` : ""}</div>` : ""}
     ${g.lifecycle === "sold" ? `<div class="life-banner sold">Sold${g.sold_date ? ` on ${esc(fmtDate(g.sold_date))}` : ""}${money && g.sold_price != null ? ` for ${esc(fmtPrice(g.sold_price))}` : ""} · kept as history</div>` : ""}
     <div class="hero">
-      <div class="hero-photo">${g.cover ? `<img src="${g.cover}" alt="" />` : TYPE_ICON[g.type]}</div>
+      <div class="hero-gallery">
+        <div class="hero-photo" id="gd-photo-view">${g.photos.length
+          ? `<img id="gd-photo-img" src="${g.photos[0].url}" alt="${esc(g.name)} photo" />`
+          : TYPE_ICON[g.type]}</div>
+        <div class="hero-photo-actions">
+          <div class="row">
+            <button class="small" id="gd-photo-add" type="button" aria-expanded="false">Upload photo</button>
+            ${g.photos.length ? `<button class="small ghost danger" id="gd-photo-del" type="button">Delete photo</button>` : ""}
+          </div>
+          ${g.photos.length > 1 ? `<div class="row">
+            <button class="small ghost" id="gd-photo-prev" type="button" aria-label="Previous photo">&#8249; Previous</button>
+            <span class="muted" id="gd-photo-count"></span>
+            <button class="small ghost" id="gd-photo-next" type="button" aria-label="Next photo">Next &#8250;</button>
+          </div>` : ""}
+          ${g.photos.length ? `<div class="row"><span id="gd-photo-cover-wrap"></span></div>` : ""}
+          <form id="photo-form" class="row" hidden>
+            <input type="file" id="photo-file" accept="image/*" required />
+            <button class="small" type="submit">Upload</button>
+          </form>
+        </div>
+      </div>
       <div>
         ${g.type === "guitar" && maintenance && g.strings ? `<p>${stringsChip(g.strings, true)}</p>` : ""}
         <div class="facts">
@@ -723,29 +743,6 @@ async function gearDetailView(id) {
         </div>` : ""}
         ${g.notes ? `<h2>Notes</h2><p class="notes">${esc(g.notes)}</p>` : ""}
       </div>
-    </div>
-    <h2>Photos</h2>
-    <div class="card">
-      <div class="photo-view" id="gd-photo-view">
-        ${g.photos.length
-          ? `<img id="gd-photo-img" src="${g.photos[0].url}" alt="" />`
-          : `<p class="empty" style="margin:0">No photos yet.</p>`}
-        ${g.photos.length > 1 ? `
-          <button class="photo-nav prev" id="gd-photo-prev" type="button" aria-label="Previous photo">&lsaquo;</button>
-          <button class="photo-nav next" id="gd-photo-next" type="button" aria-label="Next photo">&rsaquo;</button>` : ""}
-      </div>
-      <div class="row photo-actions">
-        <button class="small" id="gd-photo-add" type="button" aria-expanded="false">Add photo</button>
-        <span id="gd-photo-tools" class="row" ${g.photos.length ? "" : "hidden"}>
-          ${g.photos.length ? `<span id="gd-photo-cover-wrap">${g.photos.length > 1 ? `<button class="small ghost" id="gd-photo-cover" type="button">Cover</button>` : `<span class="badge">Cover</span>`}</span>
-          <button class="small ghost danger" id="gd-photo-del" type="button">Delete</button>
-          <span class="muted" id="gd-photo-count"></span>` : ""}
-        </span>
-      </div>
-      <form id="photo-form" class="row" hidden>
-        <input type="file" id="photo-file" accept="image/*" required />
-        <button class="small" type="submit">Upload</button>
-      </form>
     </div>
     ${g.type === "guitar" && maintenance && g.strings ? `
     <h2>Strings</h2>
@@ -863,7 +860,7 @@ async function gearDetailView(id) {
     photoIdx = (next + g.photos.length) % g.photos.length;
     const p = g.photos[photoIdx];
     document.getElementById("gd-photo-img").src = p.url;
-    document.getElementById("gd-photo-count").textContent = `${photoIdx + 1} of ${g.photos.length}`;
+    if (g.photos.length > 1) document.getElementById("gd-photo-count").textContent = `${photoIdx + 1} of ${g.photos.length}`;
     document.getElementById("gd-photo-cover-wrap").innerHTML = photoIdx > 0
       ? `<button class="small ghost" id="gd-photo-cover" type="button">Cover</button>` : `<span class="badge">Cover</span>`;
   }
@@ -873,16 +870,14 @@ async function gearDetailView(id) {
       document.getElementById("gd-photo-prev").addEventListener("click", () => showPhoto(photoIdx - 1));
       document.getElementById("gd-photo-next").addEventListener("click", () => showPhoto(photoIdx + 1));
     }
-    document.getElementById("gd-photo-tools").addEventListener("click", async (e) => {
-      const p = g.photos[photoIdx];
-      if (!p) return;
-      if (e.target.closest("#gd-photo-cover")) {
-        await api(`/api/photos/${p.id}/cover`, { method: "POST" });
-        gearDetailView(id);
-      } else if (e.target.closest("#gd-photo-del")) {
-        await api(`/api/photos/${p.id}`, { method: "DELETE" });
-        gearDetailView(id);
-      }
+    document.getElementById("gd-photo-cover-wrap").addEventListener("click", async (e) => {
+      if (!e.target.closest("#gd-photo-cover")) return;
+      await api(`/api/photos/${g.photos[photoIdx].id}/cover`, { method: "POST" });
+      gearDetailView(id);
+    });
+    document.getElementById("gd-photo-del").addEventListener("click", async () => {
+      await api(`/api/photos/${g.photos[photoIdx].id}`, { method: "DELETE" });
+      gearDetailView(id);
     });
   }
   photoForm.addEventListener("submit", async (e) => {

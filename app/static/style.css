@@ -421,7 +421,6 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; min-hei
   .tab { flex: 1 0 auto; padding: 0 10px; font-size: 14px; }
   .seg { display: flex; width: 100%; }
   .seg a { flex: 1; padding: 0 8px; min-height: 40px; }
-  .photo-view img { height: 240px; }
   .ct-row { grid-template-columns: minmax(0, 1fr) minmax(0, 0.7fr) 96px; }
   .ct-row [data-ct-up], .ct-row [data-ct-down], .ct-row [data-ct-del] { grid-row: 2; min-width: 44px; justify-self: start; }
   .form-grid.tight { grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -548,10 +547,12 @@ details summary { cursor: pointer; color: var(--muted); font-size: 14px; min-hei
 }
 
 /* gear photos: one at a time with arrows, tools underneath */
-.photo-view { position: relative; }
-.photo-view img { width: 100%; height: 340px; object-fit: contain; border-radius: 12px; display: block; }
-.photo-nav { position: absolute; top: 50%; transform: translateY(-50%); width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--line); background: color-mix(in srgb, var(--panel) 82%, transparent); color: var(--text); font-size: 24px; line-height: 1; cursor: pointer; }
-.photo-nav.prev { left: 8px; }
-.photo-nav.next { right: 8px; }
-.photo-actions { margin-top: 10px; align-items: center; }
-.photo-actions #gd-photo-count { margin-left: auto; }
+/* One photo on the gear detail page: the hero is also the gallery. */
+.hero-gallery { min-width: 0; }
+.hero-gallery .hero-photo img { object-fit: contain; }
+.hero-photo-actions { display: grid; gap: 8px; margin-top: 10px; }
+.hero-photo-actions .row { gap: 6px; }
+.hero-photo-actions input[type="file"] { min-width: 0; max-width: 100%; }
+@media (max-width: 650px) {
+  .hero-photo-actions .row { justify-content: flex-start; }
+}

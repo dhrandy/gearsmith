@@ -188,7 +188,9 @@ Edit single entries with /api/v1/songs/{id}/rig/{setting_id} and
 Photos on preset settings: POST /api/v1/presets/{id}/photos (multipart field "photo"), DELETE /api/v1/preset-photos/{photo_id}. The preset response contains photos and a cover; the Artists list includes the cover. Song rig rows also accept POST /api/v1/songs/{id}/rig/{setting_id}/photos and DELETE /api/v1/rig-photos/{photo_id}. Photo URLs use the signed-in web session, while the token API returns their paths.
 Presets: list and add (GET/POST /api/v1/presets), read, update or delete one
 (GET/PATCH/DELETE /api/v1/presets/{id}). A preset has name, artist, amp_id, notes, and the
-same "rig" and "patches" lists as a song. Songs point at presets with a "presets" list
+same "rig" and "patches" lists as a song. PATCH /api/v1/presets/{id}/rig/{setting_id}
+updates one rig entry without replacing its rows or setting photos. On the preset page,
+knob arrows reorder controls and save immediately. Songs point at presets with a "presets" list
 ([{preset_id, label, note}]); editing a preset changes every song that uses it.
 Preset reads also include chain_summary: the chain's gear and effect names in signal order.
 POST /api/v1/songs/{id}/save-as-preset (name, use_in_song) turns a song's chain into a preset.

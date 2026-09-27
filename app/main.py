@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.13.0"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -3325,6 +3325,37 @@ def register_preset_routes(prefix: str, auth, v1: bool) -> None:
         auth(request)
         with db() as c:
             return await attach_owner_photo(c, "preset", preset_id, photo)
+
+    @route("patch", "/presets/{preset_id}/rig/{setting_id}",
+           "Change one preset rig entry without replacing its photos or other settings")
+    def _preset_rig_edit(preset_id: int, setting_id: int, body: RigSettingPatch, request: Request):
+        auth(request)
+        with db() as c:
+            get_preset_row(c, preset_id)
+            row = c.execute(
+                "SELECT * FROM preset_gear_settings WHERE id=? AND preset_id=?", (setting_id, preset_id)
+            ).fetchone()
+            if not row:
+                raise HTTPException(404, "Preset rig entry not found")
+            data = body.model_dump(exclude_unset=True)
+            cols: dict[str, Any] = {}
+            if "gear_id" in data or "gear_name" in data:
+                gid, name = gear_link(c, data.get("gear_id", row["gear_id"]), None,
+                                      data.get("gear_name") or row["gear_name"])
+                cols["gear_id"], cols["gear_name"] = gid, name or row["gear_name"]
+            if data.get("position") is not None:
+                cols["position"] = data["position"]
+            if data.get("engaged") is not None:
+                cols["engaged"] = data["engaged"]
+            if data.get("knobs") is not None:
+                cols["knobs"] = knobs_json(body.knobs)
+            if data.get("note") is not None:
+                cols["note"] = data["note"].strip()
+            if cols:
+                sql = ", ".join(f"{k}=?" for k in cols)
+                c.execute(f"UPDATE preset_gear_settings SET {sql} WHERE id=?", (*cols.values(), setting_id))
+                c.execute("UPDATE presets SET updated_at=? WHERE id=?", (now_iso(), preset_id))
+            return rig_dict(c.execute("SELECT * FROM preset_gear_settings WHERE id=?", (setting_id,)).fetchone(), c, PRESET)
 
     @route("post", "/presets/{preset_id}/rig/{setting_id}/photos",
            "Attach a photo to one setting in a preset", status_code=201)

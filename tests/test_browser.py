@@ -1495,3 +1495,32 @@ def test_knob_reorder_from_song_view(app_url, width, height):
         assert [x["name"] for x in req.get(app_url + f"/api/songs/{song['id']}").json()["rig"][0]["knobs"]] == ["Treble", "Level", "Gain"]
         assert_no_overflow(page, "song view knob reorder")
         browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1280, 900), (390, 844), (280, 653)])
+def test_knob_reorder_from_preset_view(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        preset = req.post(app_url + "/api/presets", data={
+            "name": "View reorder", "rig": [{"gear_name": "Test amp", "knobs": [
+                {"name": "Gain", "value": "9:30"}, {"name": "Treble", "value": "noon"},
+                {"name": "Level", "value": "7"}]}]}).json()
+        page.goto(app_url + f"/#/presets/{preset['id']}")
+        card = page.locator(".chain-item").first
+        expect(card.locator("[data-kord-up]")).to_have_count(3)
+        expect(card.locator("[data-kord-down]")).to_have_count(3)
+        expect(card.get_by_role("button", name="Move Gain earlier")).to_be_disabled()
+        expect(card.get_by_role("button", name="Move Level later")).to_be_disabled()
+        with page.expect_response(lambda r: r.request.method == "PATCH" and f"/api/presets/{preset['id']}/rig/" in r.url):
+            card.get_by_role("button", name="Move Treble earlier").click()
+        assert [x["name"] for x in req.get(app_url + f"/api/presets/{preset['id']}").json()["rig"][0]["knobs"]] == ["Treble", "Gain", "Level"]
+        expect(card.locator(".knob").first).to_contain_text("Treble")
+        expect(card.get_by_role("button", name="Move Treble earlier")).to_be_disabled()
+        with page.expect_response(lambda r: r.request.method == "PATCH" and f"/api/presets/{preset['id']}/rig/" in r.url):
+            card.get_by_role("button", name="Move Gain later").click()
+        assert [x["name"] for x in req.get(app_url + f"/api/presets/{preset['id']}").json()["rig"][0]["knobs"]] == ["Treble", "Level", "Gain"]
+        assert_no_overflow(page, "preset view knob reorder")
+        browser.close()

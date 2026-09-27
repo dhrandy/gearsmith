@@ -1655,3 +1655,41 @@ def test_rig_entry_knob_reorder(tmp_path):
         assert after["knobs"] == moved
         assert after["engaged"] == "off"
         assert after["note"] == "keep me"
+
+
+def test_preset_rig_entry_reorder_keeps_setting_photo_and_other_fields(tmp_path):
+    fresh(tmp_path)
+    photo = b"\xff\xd8\xff" + b"preset setting" * 100
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        token = c.post("/api/tokens", json={"name": "preset-reorder"}).json()["token"]
+        auth = {"Authorization": f"Bearer {token}"}
+        knobs = [{"name": "Gain", "value": "9:30"}, {"name": "Treble", "value": "noon"},
+                 {"name": "Level", "value": "7"}]
+        preset = c.post("/api/presets", json={"name": "Compact", "rig": [
+            {"gear_name": "Amp", "knobs": knobs, "engaged": "off", "note": "keep me"},
+            {"gear_name": "Pedal", "knobs": [{"name": "Tone", "value": "5"}]},
+        ]}).json()
+        pid = preset["id"]
+        entry, other = preset["rig"]
+        photo_result = c.post(f"/api/presets/{pid}/rig/{entry['id']}/photos",
+                              files={"photo": ("amp.jpg", photo, "image/jpeg")})
+        assert photo_result.status_code == 201
+        attached = photo_result.json()
+        endpoint = f"/api/presets/{pid}/rig/{entry['id']}"
+        moved = [knobs[1], knobs[0], knobs[2]]
+        assert c.patch(endpoint, json={"knobs": moved}).json()["photos"] == [attached]
+        saved = c.get(f"/api/presets/{pid}").json()["rig"]
+        assert saved[0]["id"] == entry["id"]
+        assert saved[0]["knobs"] == moved
+        assert saved[0]["photos"] == [attached]
+        assert saved[0]["engaged"] == "off" and saved[0]["note"] == "keep me"
+        assert saved[1] == other
+        assert c.get(attached["url"]).content == photo
+        assert c.patch(f"/api/presets/{pid + 999}/rig/{entry['id']}", json={"knobs": knobs}).status_code == 404
+        assert c.patch(f"/api/presets/{pid}/rig/{other['id']}", json={"knobs": knobs}).status_code == 200
+        assert c.patch(f"/api/presets/{pid}/rig/99999", json={"knobs": knobs}).status_code == 404
+        assert c.patch(f"/api/v1/presets/{pid}/rig/{entry['id']}", json={"knobs": knobs}).status_code == 401
+        assert c.patch(f"/api/v1/presets/{pid}/rig/{entry['id']}", headers=auth,
+                       json={"knobs": knobs}).json()["knobs"] == knobs
+        assert "/api/v1/presets/{preset_id}/rig/{setting_id}" in c.get("/api/v1/openapi.json").json()["paths"]

@@ -1354,12 +1354,12 @@ function dialAngle(value) {
   return null;
 }
 
-// orderEntry: a song rig entry id adds arrows that reorder the knobs right on the song page.
+// orderEntry: a song or preset rig entry id shows reorder arrows on its detail page.
 function knobText(knobs, orderEntry = null) {
-  const named = knobs.filter((k) => k.name);
+  const named = knobs.map((k, index) => ({ ...k, index })).filter((k) => k.name);
   return named.map((k, j) => {
     const label = `<span>${esc(k.name)}</span>${esc(k.value || "-")}`;
-    const order = orderEntry === null ? "" : `<span class="knob-order"><button class="small ghost" type="button" data-kord-up="${orderEntry}:${j}" aria-label="Move ${esc(k.name)} earlier" ${j === 0 ? "disabled" : ""}>↑</button><button class="small ghost" type="button" data-kord-down="${orderEntry}:${j}" aria-label="Move ${esc(k.name)} later" ${j === named.length - 1 ? "disabled" : ""}>↓</button></span>`;
+    const order = orderEntry === null ? "" : `<span class="knob-order"><button class="small ghost" type="button" data-kord-up="${orderEntry}:${k.index}" aria-label="Move ${esc(k.name)} earlier" ${j === 0 ? "disabled" : ""}>↑</button><button class="small ghost" type="button" data-kord-down="${orderEntry}:${k.index}" aria-label="Move ${esc(k.name)} later" ${j === named.length - 1 ? "disabled" : ""}>↓</button></span>`;
     const angle = featureOn("feature_dials") ? dialAngle(k.value) : null;
     if (angle === null) return `<span class="knob">${label}${order}</span>`;
     const ticks = [-150, -120, -90, -60, -30, 0, 30, 60, 90, 120, 150]
@@ -1379,7 +1379,7 @@ function chainHtml(rig, owner = null) {
             <strong class="wrap-any">${gearLink(r.gear_id, r.gear_name)}</strong>
             <span class="engaged eng-${esc(r.engaged)}">${ENGAGED_LABEL[r.engaged] || esc(r.engaged)}</span>
           </div>
-          ${r.knobs.length ? `<div class="knobs">${knobText(r.knobs, owner && owner.kind === "song" ? r.id : null)}</div>` : ""}
+          ${r.knobs.length ? `<div class="knobs">${knobText(r.knobs, owner ? r.id : null)}</div>` : ""}
           ${r.note ? `<p class="notes muted">${esc(r.note)}</p>` : ""}
           ${owner && featureOn("feature_setting_photos") ? `
             <div class="setting-photos">
@@ -1488,6 +1488,25 @@ async function presetDetailView(id) {
       ? `<div class="set-chips">${p.songs.map((s) => `<a class="set-chip link-chip" href="#/songs/${s.id}" title="${esc(s.title)}">${esc(s.title)}${s.artist ? ` <span class="muted">${esc(s.artist)}</span>` : ""}</a>`).join("")}</div>
          <p class="hint">Changes to this preset show up in all of these songs.</p>`
       : `<span class="muted">No songs use this preset yet. Pick it in a song's editor.</span>`}</div>`;
+  view.querySelectorAll("[data-kord-up],[data-kord-down]").forEach((button) => button.addEventListener("click", async () => {
+    const dir = button.dataset.kordUp !== undefined ? "up" : "down";
+    const [entryId, index] = (dir === "up" ? button.dataset.kordUp : button.dataset.kordDown).split(":").map(Number);
+    const entry = p.rig.find((r) => r.id === entryId);
+    if (!entry) return;
+    const named = entry.knobs.map((knob, i) => knob.name ? i : -1).filter((i) => i >= 0);
+    const at = named.indexOf(index);
+    const target = named[at + (dir === "up" ? -1 : 1)];
+    if (target === undefined) return;
+    const knobs = entry.knobs.map((knob) => ({ name: knob.name, value: knob.value }));
+    [knobs[index], knobs[target]] = [knobs[target], knobs[index]];
+    button.disabled = true;
+    try {
+      await api(`/api/presets/${id}/rig/${entryId}`, { method: "PATCH", body: { knobs } });
+      toast("Knob order saved");
+      await presetDetailView(id);
+      view.querySelector(`[data-kord-${dir}="${entryId}:${target}"]`)?.focus();
+    } catch (error) { button.disabled = false; toast(error.message); }
+  }));
   const photoForm = document.getElementById("preset-photo-form");
   if (photoForm) photoForm.addEventListener("submit", async (event) => {
     event.preventDefault();

@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.9.0"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -955,7 +955,7 @@ FEATURE_LABELS = {
     "pedals": "Pedals section",
     "picks": "Picks section",
     "strings": "Strings section (string packs)",
-    "sets": "Sets (rigs and boards)",
+    "sets": "My Boards (physical boards and setups)",
     "maintenance": "Maintenance (restring tracking)",
     "songs": "Songs (rig and tone settings per song)",
     "want": "Want list",

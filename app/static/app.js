@@ -255,7 +255,7 @@ function route() {
     else if (parts[1] === "new") songEditorView(null, "preset");
     else if (parts[1] && parts[2] === "edit") songEditorView(Number(parts[1]), "preset");
     else if (parts[1]) presetDetailView(Number(parts[1]));
-    else presetsView();
+    else artistsView();
   }
   else if (parts[0] === "setlists") {
     tab = "songs";
@@ -823,10 +823,10 @@ async function gearDetailView(id) {
     <h2>Share</h2>
     <div class="card" id="gd-share"></div>
     ${featureOn("feature_sets") ? `
-    <h2>Sets</h2>
+    <h2>My Boards</h2>
     <div class="card">
       <div class="set-chips" id="gd-sets">
-        ${g.sets.map((s) => `<a class="set-chip link-chip" href="#/sets/${s.id}" title="${esc(s.name)}">${esc(s.name)}</a>`).join("") || `<span class="muted">Not in any set.</span>`}
+        ${g.sets.map((s) => `<a class="set-chip link-chip" href="#/sets/${s.id}" title="${esc(s.name)}">${esc(s.name)}</a>`).join("") || `<span class="muted">Not in any board or setup.</span>`}
       </div>
     </div>` : ""}`;
 
@@ -1293,12 +1293,11 @@ function songChips(s) {
 const SONG_VIEWS = [
   ["songs", "Songs", "#/songs"],
   ["artists", "Artists", "#/songs/artists"],
-  ["presets", "Presets", "#/presets"],
   ["setlists", "Setlists", "#/setlists"],
 ];
 
 function songsNav(current) {
-  return `<nav class="seg" aria-label="Songs, artists, presets and setlists">
+  return `<nav class="seg" aria-label="Songs, artists and setlists">
     ${SONG_VIEWS.map(([key, label, href]) => `<a href="${href}" class="${key === current ? "on" : ""}" ${key === current ? 'aria-current="page"' : ""}>${label}</a>`).join("")}
   </nav>`;
 }
@@ -1422,10 +1421,10 @@ async function artistsView() {
   view.innerHTML = `
     <div class="pagehead">
       <h1>Artists</h1>
-      <a class="btn primary" href="#/songs/new">Add song</a>
+      <a class="btn primary" href="#/presets/new">Add artist sound</a>
     </div>
     ${songsNav("artists")}
-    <p class="muted">Your songs and presets grouped by the artist field.</p>
+    <p class="muted">Songs and artist sounds, grouped by artist. Song rigs stay with Songs; physical boards live in My Boards.</p>
     <div class="toolbar"><input type="search" id="artist-search" placeholder="Filter by artist..." /></div>
     <div id="artist-list"></div>`;
   const list = document.getElementById("artist-list");
@@ -1436,41 +1435,18 @@ async function artistsView() {
     list.innerHTML = shown.map((g) => {
       const counts = [
         g.song_count ? (g.song_count === 1 ? "1 song" : `${g.song_count} songs`) : "",
-        g.preset_count ? (g.preset_count === 1 ? "1 preset" : `${g.preset_count} presets`) : "",
+        g.preset_count ? (g.preset_count === 1 ? "1 sound" : `${g.preset_count} sounds`) : "",
       ].filter(Boolean).join(" · ");
       return `
       <section class="artist-group">
         <h2 class="wrap-any">${g.artist ? esc(g.artist) : "No artist"} <span class="muted count">${counts}</span></h2>
         ${g.songs.length ? `<div class="grid">${g.songs.map(songCard).join("")}</div>` : ""}
         ${g.presets.length ? `<details class="artist-presets">
-          <summary>Presets <span class="muted count">${g.preset_count}</span></summary>
+          <summary>Artist sounds <span class="muted count">${g.preset_count}</span></summary>
           <div class="grid">${g.presets.map(presetCard).join("")}</div>
         </details>` : ""}
       </section>`;
     }).join("") || `<p class="empty">${groups.length ? "Nothing matches." : "No songs yet. Add one with an artist and it shows up here."}</p>`;
-  }
-  render();
-  search.addEventListener("input", render);
-}
-
-async function presetsView() {
-  const presets = await api("/api/presets");
-  view.innerHTML = `
-    <div class="pagehead">
-      <h1>Presets</h1>
-      <a class="btn primary" href="#/presets/new">Add preset</a>
-    </div>
-    ${songsNav("presets")}
-    <p class="muted">A preset is a named tone saved once: the chain, knob settings and patches. Use it in any song, and when you change the preset every song using it follows.</p>
-    <div class="toolbar"><input type="search" id="preset-search" placeholder="Filter by name or artist..." /></div>
-    <div class="grid" id="preset-list"></div>`;
-  const list = document.getElementById("preset-list");
-  const search = document.getElementById("preset-search");
-  function render() {
-    const needle = search.value.trim().toLowerCase();
-    const shown = presets.filter((p) => !needle || `${p.name} ${p.artist}`.toLowerCase().includes(needle));
-    list.innerHTML = shown.map(presetCard).join("") ||
-      `<p class="empty">${presets.length ? "Nothing matches." : "No presets yet. Add one here, or open a song and save its chain as a preset."}</p>`;
   }
   render();
   search.addEventListener("input", render);
@@ -1555,7 +1531,7 @@ async function presetDetailView(id) {
       await api(`/api/presets/${id}`, { method: "DELETE" });
       closeSheet();
       toast("Preset deleted");
-      location.hash = "#/presets";
+      location.hash = "#/songs/artists";
     });
   });
 }
@@ -1808,7 +1784,7 @@ async function songDetailView(id) {
     <div class="chips">${songChips(s)}</div>
     ${rigFacts.length ? `<div class="facts recall-facts">${rigFacts.map(([k, v]) => `<div class="fact"><span>${k}</span>${v}</div>`).join("")}</div>` : ""}
     ${s.presets.length ? `
-    <h2>Presets</h2>
+    <h2>Linked artist sounds</h2>
     <div class="stack">
       ${s.presets.map((link) => `
         <div class="card preset-use">
@@ -2024,7 +2000,7 @@ async function songEditorView(id, kind = "song") {
 
   function presetPicker() {
     return `
-        <h2>Presets</h2>
+        <h2>Linked artist sounds</h2>
         <p class="hint" style="margin-top:-6px">Saved tones this song uses. They stay linked: edit the preset and this song follows. Add a label like "Verse" or "Solo" if the song switches tones.</p>
         <div class="stack" id="preset-rows">
           ${draft.presets.map((l, i) => `
@@ -2048,7 +2024,7 @@ async function songEditorView(id, kind = "song") {
             <option value="">Use a preset...</option>
             ${allPresets.map((pr) => `<option value="${pr.id}">${esc(pr.name)}${pr.artist ? ` (${esc(pr.artist)})` : ""}</option>`).join("")}
           </select>
-        </div>` : `<p class="hint">No presets yet. Make one on the Presets page, or save a song's chain as a preset from its page.</p>`}`;
+        </div>` : `<p class="hint">No artist sounds yet. Add one from Artists, or save a song's chain as a reusable sound.</p>`}`;
   }
 
   function render() {
@@ -2323,10 +2299,10 @@ async function setsView() {
   const sets = await api("/api/sets");
   view.innerHTML = `
     <div class="pagehead">
-      <h1>Sets</h1>
-      <button class="primary" id="add-set" type="button">New set</button>
+      <h1>My Boards</h1>
+      <button class="primary" id="add-set" type="button">New board or setup</button>
     </div>
-    <p class="muted">Group gear into rigs: a pedalboard, a gig rig, a recording chain. Gear can live in several sets or none.</p>
+    <p class="muted">Your physical boards and setups. Keep their gear and signal order here; song-specific settings stay in Songs.</p>
     <div class="stack" id="sets-list">
       ${sets.length ? sets.map((s) => `
         <div class="set-card">
@@ -2340,7 +2316,7 @@ async function setsView() {
           </div>
           ${s.notes ? `<p class="muted set-notes" style="margin:6px 0 0">${esc(s.notes)}</p>` : ""}
           ${setMembersHtml(s)}
-        </div>`).join("") : `<p class="empty">No sets yet. Make one for a board or rig.</p>`}
+        </div>`).join("") : `<p class="empty">No boards yet. Add your physical pedalboard or setup here.</p>`}
     </div>`;
   document.getElementById("add-set").addEventListener("click", () => setForm());
   view.querySelectorAll("[data-editset]").forEach((b) => b.addEventListener("click", async () => {
@@ -2356,7 +2332,7 @@ async function setsView() {
   }));
   view.querySelectorAll("[data-delset]").forEach((b) => b.addEventListener("click", async () => {
     await api(`/api/sets/${b.dataset.delset}`, { method: "DELETE" });
-    toast("Set deleted");
+    toast("Board deleted");
     setsView();
   }));
 }
@@ -2378,13 +2354,13 @@ async function setDetailView(id) {
   } catch (ex) {
     view.innerHTML = `
       <div class="pagehead"><h1>Set not found</h1></div>
-      <p class="muted">This set may have been deleted.</p>
+      <p class="muted">This board may have been deleted.</p>
       <p><a class="btn" href="#/sets">All sets</a></p>`;
     return;
   }
   const count = s.items.length;
   view.innerHTML = `
-    <p class="crumb"><a href="#/sets">Sets</a></p>
+    <p class="crumb"><a href="#/sets">My Boards</a></p>
     <div class="pagehead">
       <h1>${esc(s.name)}</h1>
       <div class="row">
@@ -2403,7 +2379,7 @@ async function setDetailView(id) {
   document.getElementById("sd-set-delete").addEventListener("click", () => {
     openSheet(`
       <h2>Delete ${esc(s.name)}?</h2>
-      <p class="muted">This removes the set. The gear in it stays.</p>
+      <p class="muted">This removes the board. The gear in it stays.</p>
       <div class="sheet-actions">
         <button type="button" id="del-cancel">Cancel</button>
         <button class="primary danger" id="del-confirm" type="button">Delete</button>
@@ -2412,7 +2388,7 @@ async function setDetailView(id) {
     document.getElementById("del-confirm").addEventListener("click", async () => {
       await api(`/api/sets/${id}`, { method: "DELETE" });
       closeSheet();
-      toast("Set deleted");
+      toast("Board deleted");
       location.hash = "#/sets";
     });
   });
@@ -2582,12 +2558,12 @@ async function setForm(existing = null, onDone = setsView) {
   const gear = await api("/api/gear");
   const chosen = new Set(existing ? existing.items.map((i) => i.id) : []);
   openSheet(`
-    <h2>${existing ? "Edit" : "New"} set</h2>
+    <h2>${existing ? "Edit" : "New"} board or setup</h2>
     <form id="set-form" class="stack">
-      <div><label for="sf-name">Name</label><input id="sf-name" required maxlength="80" value="${esc(existing?.name || "")}" placeholder="e.g. Big board, Gig rig" /></div>
+      <div><label for="sf-name">Name</label><input id="sf-name" required maxlength="80" value="${esc(existing?.name || "")}" placeholder="e.g. Mini Pedal Board, Compact Setup" /></div>
       <div><label for="sf-notes">Notes</label><input id="sf-notes" maxlength="1000" value="${esc(existing?.notes || "")}" placeholder="Optional" /></div>
       <div>
-        <label>Gear in this set</label>
+        <label>Gear on this board or setup</label>
         <div class="member-pick">
           ${gear.map((g) => `
             <label class="toggle row" style="justify-content:space-between">
@@ -2599,7 +2575,7 @@ async function setForm(existing = null, onDone = setsView) {
       <p class="error" id="sf-error"></p>
       <div class="sheet-actions">
         <button type="button" id="sf-cancel">Cancel</button>
-        <button class="primary" type="submit">${existing ? "Save changes" : "Create set"}</button>
+        <button class="primary" type="submit">${existing ? "Save changes" : "Create board"}</button>
       </div>
     </form>`);
   document.getElementById("sf-cancel").addEventListener("click", closeSheet);
@@ -2688,7 +2664,7 @@ async function settingsView() {
       <p class="hint">Hide the sections you don't use. Hidden sections keep their data; they just leave the interface.</p>
       ${[
         ["feature_guitars", "Guitars"], ["feature_amps", "Amps"], ["feature_pedals", "Pedals"],
-        ["feature_picks", "Picks"], ["feature_strings", "Strings (string packs)"], ["feature_sets", "Sets (rigs and boards)"],
+        ["feature_picks", "Picks"], ["feature_strings", "Strings (string packs)"], ["feature_sets", "My Boards (physical boards and setups)"],
         ["feature_maintenance", "Maintenance (restring tracking)"],
         ["feature_songs", "Songs (rig and tone settings per song)"], ["feature_want", "Want list"],
         ["feature_sold", "Sold archive"], ["feature_tuner", "Tuner (uses the mic, runs on your device)"],
@@ -3214,7 +3190,7 @@ function tunerView() {
         groups.push(group("Songs", data.songs.map((s) => resultItem(`#/songs/${s.id}`, "\u{1F3B5}", s.title, s.artist))));
       }
       if (data.presets.length) {
-        groups.push(group("Presets", data.presets.map((p) => resultItem(`#/presets/${p.id}`, "\u{1F39B}\uFE0F", p.name, p.artist))));
+        groups.push(group("Artist sounds", data.presets.map((p) => resultItem(`#/presets/${p.id}`, "\u{1F39B}\uFE0F", p.name, p.artist))));
       }
       if (data.artists.length) {
         groups.push(group("Artists", data.artists.map((a) => {
@@ -3230,7 +3206,7 @@ function tunerView() {
       }
     }
     if (featureOn("feature_sets") && data.sets.length) {
-      groups.push(group("Sets", data.sets.map((s) => resultItem(`#/sets/${s.id}`, "\u{1F9E9}", s.name, ""))));
+      groups.push(group("My Boards", data.sets.map((s) => resultItem(`#/sets/${s.id}`, "\u{1F9E9}", s.name, ""))));
     }
     drop.innerHTML = groups.join("") || `<p class="gsr-empty">Nothing matches "${esc(data.q)}".</p>`;
     drop.hidden = false;

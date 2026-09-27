@@ -78,8 +78,8 @@ def test_main_screens(app_url, width, height):
         expect(page.get_by_text("Ernie Ball 10-46").first).to_be_visible()
 
         # Sets page shows the seeded set with members
-        page.get_by_role("link", name="Sets", exact=True).click()
-        expect(page.get_by_role("heading", name="Sets", exact=True)).to_be_visible()
+        page.get_by_role("link", name="My Boards", exact=True).click()
+        expect(page.get_by_role("heading", name="My Boards", exact=True)).to_be_visible()
         expect(page.locator(".set-card", has_text="Practice board")).to_be_visible()
         expect(page.locator(".set-member").first).to_be_visible()
 
@@ -456,7 +456,7 @@ def test_share_link_create_view_and_turn_off(app_url, width, height):
         assert guest.goto(url).status == 404
 
         # sets share the same way
-        page.get_by_role("link", name="Sets", exact=True).click()
+        page.get_by_role("link", name="My Boards", exact=True).click()
         page.locator(".set-card", has_text="Practice board").get_by_role("button", name="Share").click()
         page.locator("#share-box").get_by_role("button", name="Create link").click()
         set_url = page.locator("#share-box [data-share-url]").inner_text()
@@ -479,9 +479,9 @@ def test_presets_follow_songs_and_artist_view(app_url, width, height):
 
         # build a preset in the UI
         page.get_by_role("link", name="Songs", exact=True).click()
-        page.get_by_role("link", name="Presets", exact=True).click()
-        expect(page.get_by_role("heading", name="Presets")).to_be_visible()
-        page.get_by_role("link", name="Add preset").click()
+        page.get_by_role("link", name="Artists", exact=True).click()
+        expect(page.get_by_role("heading", name="Artists")).to_be_visible()
+        page.get_by_role("link", name="Add artist sound").click()
         page.locator("#sg-name").fill("Test Crunch")
         page.locator("#sg-artist").fill("Test Band")
         page.locator("#sg-amp").select_option(label="Club 20")
@@ -530,7 +530,7 @@ def test_presets_follow_songs_and_artist_view(app_url, width, height):
         expect(band.locator(".song-card", has_text="Preset Song")).to_be_visible()
         band.locator("details.artist-presets summary").click()
         expect(band.locator(".preset-card", has_text="Test Crunch")).to_be_visible()
-        expect(band.locator("h2")).to_contain_text("1 song · 1 preset")
+        expect(band.locator("h2")).to_contain_text("1 song · 1 sound")
         assert_no_overflow(page, "artists view")
         page.locator("#artist-search").fill("second")
         expect(groups).to_have_count(1)
@@ -552,10 +552,11 @@ def test_presets_follow_songs_and_artist_view(app_url, width, height):
         expect(page.locator(".chain-item")).to_contain_text("noon")
         assert req.get(app_url + f"/api/presets/{preset_id}").json()["song_count"] == 1
 
-        # presets list
+        # Old preset-list link lands in Artists; saved sounds are not boards.
         page.goto(app_url + "/#/presets")
-        expect(page.locator(".preset-card")).to_have_count(2)
-        assert_no_overflow(page, "presets list")
+        expect(page.get_by_role("heading", name="Artists")).to_be_visible()
+        assert page.locator(".artist-presets").count() == 2
+        assert_no_overflow(page, "artists sounds")
         browser.close()
 
 
@@ -743,9 +744,6 @@ def test_preset_cards_show_rig_tag_and_chain(app_url, width, height):
         expect(plain.locator(".chain-line")).to_have_text("Demo Drive")
         assert_no_overflow(page, "artists view preset cards")
 
-        page.goto(app_url + "/#/presets")
-        expect(page.locator(".preset-card .rig-tag", has_text="Ampero Mini")).to_be_visible()
-        assert_no_overflow(page, "presets list")
         browser.close()
 
 
@@ -1180,7 +1178,7 @@ def test_global_search(app_url, width, height):
         # one query groups songs, presets and artists together
         box.fill("3 doors")
         expect(drop.locator(".gsr-heading", has_text="Songs")).to_be_visible()
-        expect(drop.locator(".gsr-heading", has_text="Presets")).to_be_visible()
+        expect(drop.locator(".gsr-heading", has_text="Artist sounds")).to_be_visible()
         expect(drop.locator(".gsr-heading", has_text="Artists")).to_be_visible()
 
         # clicking a result opens its page and clears the box

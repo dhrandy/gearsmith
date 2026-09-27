@@ -533,8 +533,9 @@ def test_presets_follow_songs_and_artist_view(app_url, width, height):
         expect(band.locator(".preset-card", has_text="Test Crunch")).to_be_visible()
         expect(band.locator("h2")).to_contain_text("1 song · 1 sound")
         assert_no_overflow(page, "artists view")
-        page.locator("#artist-search").fill("second")
+        page.locator("#global-search").fill("second")
         expect(groups).to_have_count(1)
+        page.locator("#global-search").fill("")
 
         # save a song's own chain as a preset, switching the song over
         other = [s for s in req.get(app_url + "/api/songs").json() if s["title"] == "Other Song"][0]
@@ -590,9 +591,9 @@ def test_strings_type_and_guitar_picks_strings(app_url, width, height):
 
         # search matches the gauge, the string-type filter narrows the strings section
         page.goto(app_url + "/#/")
-        page.locator("#gear-search").fill("9-42")
+        page.locator("#global-search").fill("9-42")
         expect(page.locator(".gear-card")).to_have_count(1)
-        page.locator("#gear-search").fill("")
+        page.locator("#global-search").fill("")
         page.locator("#string-type-filter").select_option("bass")
         expect(page.locator(".gear-card", has_text="Ui Strings 9-42")).to_have_count(0)
         expect(page.locator(".gear-card", has_text="Starling")).to_have_count(1)
@@ -907,7 +908,7 @@ def test_gear_page_previous_and_next(app_url, width, height):
 
         # a filtered Gear page is the list you walk
         page.goto(app_url + "/#/")
-        page.locator("#gear-search").fill("Starling")
+        page.locator("#global-search").fill("Starling")
         expect(page.locator(".gear-card")).to_have_count(1)
         page.locator(".gear-card").first.click()
         expect(page.get_by_role("heading", name="Starling", exact=True)).to_be_visible()
@@ -1191,12 +1192,24 @@ def test_global_search(app_url, width, height):
         expect(drop).to_be_hidden()
         expect(box).to_have_value("")
 
-        # gear results open the gear page, from any page
+        # one sitewide box on every page; the old per-section filters are gone
+        expect(box).to_be_visible()
+        page.goto(app_url + "/#/songs")
+        expect(box).to_be_visible()
+        expect(page.locator("#song-search")).to_have_count(0)
+        expect(page.locator("#artist-search")).to_have_count(0)
+        page.goto(app_url + "/#/")
+        expect(page.locator("#gear-search")).to_have_count(0)
+        # it narrows the list on screen while the dropdown searches everything
+        box.fill("starling")
+        expect(page.locator(".gear-card")).to_have_count(1)
+        box.fill("")
         box.fill("starling")
         drop.locator(".gsr-item", has_text="Starling").click()
         expect(page.get_by_role("heading", name="Starling", exact=True)).to_be_visible()
 
         # no matches says so, and Escape closes the dropdown
+        page.goto(app_url + "/#/")
         box.fill("zzz nothing here")
         expect(page.locator(".gsr-empty")).to_be_visible()
         page.keyboard.press("Escape")
@@ -1226,7 +1239,7 @@ def test_control_defaults_prefill_song_rigs(app_url, width, height):
         page.locator("#rig-pick").select_option(label="Demo Drive")
         vals = page.locator("[data-r-kval^='0:']")
         expect(vals).to_have_count(3)
-        assert [vals.nth(i).input_value() for i in range(3)] == ["2:00", "noon", ""]
+        assert [vals.nth(i).input_value() for i in range(3)] == ["2:00", "noon", "noon"]  # no default on the gear: knobs start at noon, never blank
         page.locator("[data-r-kval='0:1']").fill("1:30")
         page.get_by_role("button", name="Add song").click()
 
@@ -1673,4 +1686,43 @@ def test_song_rig_display_follows_item_control_order(app_url, width, height):
         knobs = page.locator(".chain-item .knob")
         expect(knobs).to_have_count(4)
         assert [knobs.nth(i).inner_text().split("\n")[0].lower() for i in range(4)] == ["gain", "treble", "master", "pedalish"]
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1440, 900), (390, 844)])
+def test_gear_photo_gallery_arrows_and_tools(app_url, width, height):
+    import base64
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4/5+hHgAHggJ/P4wW2QAAAABJRU5ErkJggg==")
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        gear = {g["name"]: g for g in req.get(app_url + "/api/gear").json()}
+        drive = gear["Demo Drive"]["id"]
+        for name in ("one.png", "two.png"):
+            assert req.post(app_url + f"/api/gear/{drive}/photos", multipart={"photo": {"name": name, "mimeType": "image/png", "buffer": png}}).ok
+
+        page.goto(app_url + f"/#/gear/{drive}")
+        img = page.locator("#gd-photo-img")
+        expect(img).to_be_visible()
+        expect(page.locator("#gd-photo-count")).to_have_text("1 of 2")
+        expect(page.locator("#gd-photo-cover-wrap .badge")).to_have_text("Cover")
+        src1 = img.get_attribute("src")
+        page.get_by_role("button", name="Next photo").click()
+        expect(page.locator("#gd-photo-count")).to_have_text("2 of 2")
+        assert img.get_attribute("src") != src1
+        expect(page.get_by_role("button", name="Cover", exact=True)).to_be_visible()
+        page.get_by_role("button", name="Previous photo").click()
+        expect(page.locator("#gd-photo-count")).to_have_text("1 of 2")
+
+        # upload is collapsed until Add photo opens it
+        expect(page.locator("#photo-form")).to_be_hidden()
+        page.get_by_role("button", name="Add photo").click()
+        expect(page.locator("#photo-form")).to_be_visible()
+
+        # delete acts on the photo on screen
+        page.locator("#gd-photo-del").click()
+        expect(page.locator("#gd-photo-count")).to_have_text("1 of 1")
+        assert req.get(app_url + f"/api/gear/{drive}").json()["photos"].__len__() == 1
         browser.close()

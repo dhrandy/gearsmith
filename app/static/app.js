@@ -198,6 +198,7 @@ function authView() {
 
 function route() {
   if (!state.me) { authView(); return; }
+  state.listFilter = null;
   topbar.hidden = false;
   document.getElementById("user-badge").textContent = state.me.username + (state.me.is_admin ? " (admin)" : "");
   document.getElementById("tab-sets").hidden = !featureOn("feature_sets");
@@ -327,7 +328,6 @@ async function gearListView(lifecycle = "owned") {
     ${lifecycle === "want" ? `<p class="muted">Gear you're after. When you buy one, edit it and switch it to Owned.</p>` : ""}
     ${lifecycle === "sold" ? `<p class="muted">Gear you've sold, kept as history. It stays out of the strings list and the main gear page.</p>` : ""}
     <div class="toolbar">
-      <input type="search" id="gear-search" placeholder="Filter by name, make, model, gauge..." />
       ${visibleTypes.includes("strings") && gear.some((g) => g.type === "strings") ? `<select id="string-type-filter" aria-label="String type">
         <option value="">All string types</option>
         ${STRING_TYPES.map(([k, label]) => `<option value="${k}">${label}</option>`).join("")}
@@ -336,7 +336,9 @@ async function gearListView(lifecycle = "owned") {
     </div>
     <div id="gear-sections"></div>`;
   const container = document.getElementById("gear-sections");
-  const search = document.getElementById("gear-search");
+  // One sitewide box: the header search narrows this grid while its dropdown searches everything.
+  let needle = (document.getElementById("global-search").value || "").trim().toLowerCase();
+  state.listFilter = (v) => { needle = v.trim().toLowerCase(); render(); };
   // Settings > Features > Collection value turns the money line off; the prices stay saved.
   if (featureOn("feature_values")) {
     api("/api/collection").then((sum) => renderTotals(document.getElementById("gear-totals"), lifecycle, sum)).catch(() => {});
@@ -345,7 +347,6 @@ async function gearListView(lifecycle = "owned") {
   const stringType = document.getElementById("string-type-filter");
   let onlyFavs = owned && favOnly();
   function render() {
-    const needle = search.value.trim().toLowerCase();
     const wantType = stringType ? stringType.value : "";
     if (favBtn) {
       favBtn.setAttribute("aria-pressed", String(onlyFavs));
@@ -391,7 +392,6 @@ async function gearListView(lifecycle = "owned") {
     rememberGearOrder(lifecycle, [...container.querySelectorAll(".gear-card")].map((a) => Number(a.getAttribute("href").split("/").pop())));
   }
   render();
-  search.addEventListener("input", render);
   if (stringType) stringType.addEventListener("change", render);
   if (favBtn) favBtn.addEventListener("click", () => {
     onlyFavs = !onlyFavs;
@@ -726,17 +726,23 @@ async function gearDetailView(id) {
     </div>
     <h2>Photos</h2>
     <div class="card">
-      <div class="photo-strip" id="gd-photos">
-        ${g.photos.map((p, i) => `
-          <div class="photo-item">
-            <img src="${p.url}" alt="" />
-            <div class="row">
-              ${i > 0 ? `<button class="small ghost" data-cover="${p.id}" type="button">Cover</button>` : `<span class="badge">Cover</span>`}
-              <button class="small ghost danger" data-delphoto="${p.id}" type="button">Delete</button>
-            </div>
-          </div>`).join("")}
+      <div class="photo-view" id="gd-photo-view">
+        ${g.photos.length
+          ? `<img id="gd-photo-img" src="${g.photos[0].url}" alt="" />`
+          : `<p class="empty" style="margin:0">No photos yet.</p>`}
+        ${g.photos.length > 1 ? `
+          <button class="photo-nav prev" id="gd-photo-prev" type="button" aria-label="Previous photo">&lsaquo;</button>
+          <button class="photo-nav next" id="gd-photo-next" type="button" aria-label="Next photo">&rsaquo;</button>` : ""}
       </div>
-      <form id="photo-form" class="row">
+      <div class="row photo-actions">
+        <button class="small" id="gd-photo-add" type="button" aria-expanded="false">Add photo</button>
+        <span id="gd-photo-tools" class="row" ${g.photos.length ? "" : "hidden"}>
+          ${g.photos.length ? `<span id="gd-photo-cover-wrap">${g.photos.length > 1 ? `<button class="small ghost" id="gd-photo-cover" type="button">Cover</button>` : `<span class="badge">Cover</span>`}</span>
+          <button class="small ghost danger" id="gd-photo-del" type="button">Delete</button>
+          <span class="muted" id="gd-photo-count"></span>` : ""}
+        </span>
+      </div>
+      <form id="photo-form" class="row" hidden>
         <input type="file" id="photo-file" accept="image/*" required />
         <button class="small" type="submit">Upload</button>
       </form>
@@ -843,7 +849,43 @@ async function gearDetailView(id) {
     });
   });
 
-  document.getElementById("photo-form").addEventListener("submit", async (e) => {
+  // One photo at a time: arrows browse, the tools under it act on the photo on screen.
+  const photoForm = document.getElementById("photo-form");
+  document.getElementById("gd-photo-add").addEventListener("click", () => {
+    const open = photoForm.hidden;
+    photoForm.hidden = !open;
+    document.getElementById("gd-photo-add").setAttribute("aria-expanded", String(open));
+    if (open) document.getElementById("photo-file").click();
+  });
+  let photoIdx = 0;
+  function showPhoto(next) {
+    if (!g.photos.length) return;
+    photoIdx = (next + g.photos.length) % g.photos.length;
+    const p = g.photos[photoIdx];
+    document.getElementById("gd-photo-img").src = p.url;
+    document.getElementById("gd-photo-count").textContent = `${photoIdx + 1} of ${g.photos.length}`;
+    document.getElementById("gd-photo-cover-wrap").innerHTML = photoIdx > 0
+      ? `<button class="small ghost" id="gd-photo-cover" type="button">Cover</button>` : `<span class="badge">Cover</span>`;
+  }
+  if (g.photos.length) {
+    showPhoto(0);
+    if (g.photos.length > 1) {
+      document.getElementById("gd-photo-prev").addEventListener("click", () => showPhoto(photoIdx - 1));
+      document.getElementById("gd-photo-next").addEventListener("click", () => showPhoto(photoIdx + 1));
+    }
+    document.getElementById("gd-photo-tools").addEventListener("click", async (e) => {
+      const p = g.photos[photoIdx];
+      if (!p) return;
+      if (e.target.closest("#gd-photo-cover")) {
+        await api(`/api/photos/${p.id}/cover`, { method: "POST" });
+        gearDetailView(id);
+      } else if (e.target.closest("#gd-photo-del")) {
+        await api(`/api/photos/${p.id}`, { method: "DELETE" });
+        gearDetailView(id);
+      }
+    });
+  }
+  photoForm.addEventListener("submit", async (e) => {
     e.preventDefault();
     const file = document.getElementById("photo-file").files[0];
     if (!file) return;
@@ -855,14 +897,6 @@ async function gearDetailView(id) {
       gearDetailView(id);
     } catch (ex) { toast(ex.message); }
   });
-  view.querySelectorAll("[data-cover]").forEach((b) => b.addEventListener("click", async () => {
-    await api(`/api/photos/${b.dataset.cover}/cover`, { method: "POST" });
-    gearDetailView(id);
-  }));
-  view.querySelectorAll("[data-delphoto]").forEach((b) => b.addEventListener("click", async () => {
-    await api(`/api/photos/${b.dataset.delphoto}`, { method: "DELETE" });
-    gearDetailView(id);
-  }));
 
   if (g.type === "guitar" && maintenance && g.strings) {
     loadRestringHistory(g);
@@ -1330,17 +1364,15 @@ async function songsView() {
     </div>
     ${songsNav("songs")}
     <p class="muted">Your rig and tone for each song: which guitar and amp, where every knob sits, and which patch and scene on a modeler.</p>
-    <div class="toolbar"><input type="search" id="song-search" placeholder="Filter by title or artist..." /></div>
     <div class="grid" id="song-list"></div>`;
   const list = document.getElementById("song-list");
-  const search = document.getElementById("song-search");
+  let needle = (document.getElementById("global-search").value || "").trim().toLowerCase();
+  state.listFilter = (v) => { needle = v.trim().toLowerCase(); render(); };
   function render() {
-    const needle = search.value.trim().toLowerCase();
     const shown = songs.filter((s) => !needle || `${s.title} ${s.artist}`.toLowerCase().includes(needle));
     list.innerHTML = shown.map(songCard).join("") || `<p class="empty">${songs.length ? "Nothing matches." : "No songs yet. Add one to save its rig and settings."}</p>`;
   }
   render();
-  search.addEventListener("input", render);
 }
 
 // O'clock positions are literal clock angles. Numeric 0-10 values use a separate
@@ -1458,12 +1490,11 @@ async function artistsView() {
     </div>
     ${songsNav("artists")}
     <p class="muted">Songs and artist sounds, grouped by artist. Song rigs stay with Songs; physical boards live in My Boards.</p>
-    <div class="toolbar"><input type="search" id="artist-search" placeholder="Filter by artist..." /></div>
     <div id="artist-list"></div>`;
   const list = document.getElementById("artist-list");
-  const search = document.getElementById("artist-search");
+  let needle = (document.getElementById("global-search").value || "").trim().toLowerCase();
+  state.listFilter = (v) => { needle = v.trim().toLowerCase(); render(); };
   function render() {
-    const needle = search.value.trim().toLowerCase();
     const shown = groups.filter((g) => !needle || g.artist.toLowerCase().includes(needle));
     list.innerHTML = shown.map((g) => {
       const counts = [
@@ -1482,7 +1513,6 @@ async function artistsView() {
     }).join("") || `<p class="empty">${groups.length ? "Nothing matches." : "No songs yet. Add one with an artist and it shows up here."}</p>`;
   }
   render();
-  search.addEventListener("input", render);
 }
 
 async function presetDetailView(id) {
@@ -1984,12 +2014,13 @@ async function songDetailView(id) {
   }));
 }
 
-// A fresh rig entry starts from the gear's controls, prefilled with your everyday setting
-// for each one. Type over anything the song needs different; the defaults stay on the gear.
+// A fresh rig entry starts from the gear's controls: your everyday setting where you keep
+// one, otherwise noon - a knob is always somewhere, so nothing starts blank. Switches stay
+// blank until you say which way they're flipped. The defaults stay on the gear.
 function knobsFromControls(g) {
   const controls = (g && g.controls) || [];
   if (!controls.length) return [{ name: "", value: "", kind: "knob" }];
-  return controls.map((c) => ({ name: c.name, value: c.value || "", kind: c.kind }));
+  return controls.map((c) => ({ name: c.name, value: c.value || (c.kind === "switch" ? "" : "noon"), kind: c.kind }));
 }
 
 /* An entry on an item with controls lists every control in panel order: the saved value,
@@ -2003,7 +2034,7 @@ function knobsForEntry(g, existing) {
     const key = String(k.name || "").toLowerCase();
     if (key && values[key] === undefined) values[key] = k.value;
   });
-  const rows = controls.map((c) => ({ name: c.name, value: values[c.name.toLowerCase()] ?? (c.value || ""), kind: c.kind }));
+  const rows = controls.map((c) => ({ name: c.name, value: values[c.name.toLowerCase()] ?? (c.value || (c.kind === "switch" ? "" : "noon")), kind: c.kind }));
   const known = new Set(controls.map((c) => c.name.toLowerCase()));
   existing.forEach((k) => {
     if (k.name && !known.has(k.name.toLowerCase())) rows.push({ ...k, kind: k.kind || "knob" });
@@ -3278,7 +3309,10 @@ function tunerView() {
     drop.hidden = true;
     drop.innerHTML = "";
     active = -1;
-    if (clear) input.value = "";
+    if (clear) {
+      input.value = "";
+      if (state.listFilter) state.listFilter("");
+    }
   }
 
   function items() {
@@ -3355,6 +3389,7 @@ function tunerView() {
   }
 
   input.addEventListener("input", () => {
+    if (state.listFilter) state.listFilter(input.value);
     clearTimeout(timer);
     timer = setTimeout(run, 200);
   });

@@ -1059,7 +1059,7 @@ def test_v030_database_upgrade_keeps_every_row(tmp_path):
     main.init_db()
     main.init_db()  # second start changes nothing and makes no second backup
     backups = sorted(p.name for p in tmp_path.glob("gearsmith-backup-*.db"))
-    assert backups == ["gearsmith-backup-before-0.3.1.db"]
+    assert backups == ["gearsmith-backup-before-0.14.0.db", "gearsmith-backup-before-0.3.1.db"]
     with sqlite3.connect(tmp_path / backups[0]) as b:
         assert b.execute("SELECT COUNT(*) FROM gear").fetchone()[0] == 4
 
@@ -1069,7 +1069,17 @@ def test_v030_database_upgrade_keeps_every_row(tmp_path):
             cols = [r[1] for r in conn.execute(f"PRAGMA table_info({t})")
                     if r[1] not in ("strings_id", "sets_on_hand", "manual_url", "current_value", "tab_url")]
             after = conn.execute(f"SELECT {', '.join(cols)} FROM {t} ORDER BY rowid").fetchall()
-            assert after == before[t], t
+            expected = before[t]
+            if t == "settings":
+                # the 0.14.0 knob migration records that it ran
+                after = [r for r in after if r[0] != "migration-knob-controls"]
+            if t == "gear":
+                # the 0.14.0 knob migration adds the amp's controls from its song knobs
+                migrated = '{"wattage": "20W", "controls": [{"name": "Gain", "kind": "knob"}]}'
+                id_col, specs_col = cols.index("id"), cols.index("specs")
+                expected = [tuple(migrated if i == specs_col and row[id_col] == 9 else row[i]
+                                  for i in range(len(cols))) for row in expected]
+            assert after == expected, t
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert "'strings'" in conn.execute("SELECT sql FROM sqlite_master WHERE name='gear'").fetchone()[0]
@@ -1693,3 +1703,141 @@ def test_preset_rig_entry_reorder_keeps_setting_photo_and_other_fields(tmp_path)
         assert c.patch(f"/api/v1/presets/{pid}/rig/{entry['id']}", headers=auth,
                        json={"knobs": knobs}).json()["knobs"] == knobs
         assert "/api/v1/presets/{preset_id}/rig/{setting_id}" in c.get("/api/v1/openapi.json").json()["paths"]
+
+
+def test_rig_knobs_follow_item_controls(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        amp = by_name["Club 20"]["id"]
+        r = c.patch(f"/api/gear/{amp}", json={"specs": {"controls": [
+            {"name": "Gain", "kind": "knob"},
+            {"name": "Master", "kind": "knob"},
+            {"name": "Bright", "kind": "switch"}]}})
+        assert r.status_code == 200, r.text
+        # out-of-order, differently-cased and unknown names normalize to panel order
+        r = c.post("/api/songs", json={"title": "Ordered", "rig": [
+            {"gear_id": amp, "knobs": [
+                {"name": "master", "value": "6"},
+                {"name": "Bright", "value": "On"},
+                {"name": "Gain", "value": "7"},
+                {"name": "Presence", "value": "5"}]},
+        ]})
+        assert r.status_code == 201, r.text
+        sid = r.json()["id"]
+        rig = c.get(f"/api/songs/{sid}").json()["rig"]
+        assert rig[0]["knobs"] == [
+            {"name": "Gain", "value": "7"},
+            {"name": "Master", "value": "6"},
+            {"name": "Bright", "value": "On"},
+            {"name": "Presence", "value": "5"}]
+        assert [ct["name"] for ct in rig[0]["controls"]] == ["Gain", "Master", "Bright"]
+        # per-entry PATCH normalizes too, for songs and presets
+        r = c.patch(f"/api/songs/{sid}/rig/{rig[0]['id']}",
+                    json={"knobs": [{"name": "Bright", "value": "Off"}, {"name": "gain", "value": "8"}]})
+        assert r.json()["knobs"] == [{"name": "Gain", "value": "8"}, {"name": "Bright", "value": "Off"}]
+        preset = c.post("/api/presets", json={"name": "Ordered Preset", "rig": [
+            {"gear_id": amp, "knobs": [{"name": "Master", "value": "3"}, {"name": "Gain", "value": "9"}]},
+        ]})
+        assert preset.status_code == 201, preset.text
+        prig = preset.json()["rig"]
+        assert prig[0]["knobs"] == [{"name": "Gain", "value": "9"}, {"name": "Master", "value": "3"}]
+        r = c.patch(f"/api/presets/{preset.json()['id']}/rig/{prig[0]['id']}",
+                    json={"knobs": [{"name": "Bright", "value": "On"}, {"name": "Master", "value": "4"}]})
+        assert r.json()["knobs"] == [{"name": "Master", "value": "4"}, {"name": "Bright", "value": "On"}]
+        # items without controls keep free-form knobs untouched
+        r = c.patch(f"/api/songs/{sid}", json={"rig": [
+            {"gear_name": "Borrowed Fuzz", "knobs": [{"name": "Level", "value": "max"}, {"name": "Fuzz", "value": "2"}]}]})
+        assert r.json()["rig"][0]["knobs"] == [{"name": "Level", "value": "max"}, {"name": "Fuzz", "value": "2"}]
+        assert r.json()["rig"][0]["controls"] == []
+
+
+def test_knob_controls_migration(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        amp = by_name["Club 20"]["id"]
+        drive = by_name["Demo Drive"]["id"]
+        # pre-0.14 data: knob names typed per song/preset, item controls empty
+        r = c.post("/api/songs", json={"title": "Old Song", "rig": [
+            {"gear_id": amp, "knobs": [
+                {"name": "Gain", "value": "7"},
+                {"name": "Volume", "value": "5"},
+                {"name": "Bright", "value": "On"}]},
+            {"gear_id": drive, "knobs": [
+                {"name": "Tone", "value": "noon"},
+                {"name": "Level", "value": "2:00"}]},
+        ]})
+        assert r.status_code == 201, r.text
+        sid = r.json()["id"]
+        r = c.post("/api/presets", json={"name": "Old Preset", "rig": [
+            {"gear_id": amp, "knobs": [
+                {"name": "Volume", "value": "4"},
+                {"name": "Gain", "value": "8"},
+                {"name": "Bright", "value": "Off"}]},
+        ]})
+        assert r.status_code == 201, r.text
+        pid = r.json()["id"]
+        with main.db() as conn:
+            conn.execute("DELETE FROM settings WHERE key='migration-knob-controls'")
+            main.migrate_knobs_to_controls(conn)
+        gear = {g["id"]: g for g in c.get("/api/gear").json()}
+        amp_controls = gear[amp]["controls"]
+        # union of names, most common order; Bright inferred as a switch
+        assert [ct["name"] for ct in amp_controls] == ["Gain", "Volume", "Bright"]
+        assert {ct["name"]: ct["kind"] for ct in amp_controls}["Bright"] == "switch"
+        assert [ct["name"] for ct in gear[drive]["controls"]] == ["Tone", "Level"]
+        # a full backup was written before any data moved
+        assert list(tmp_path.glob("gearsmith-backup-before-0.14.0*.db"))
+        # stored knobs re-sorted into panel order with every value preserved
+        song = c.get(f"/api/songs/{sid}").json()
+        amp_entry = next(r for r in song["rig"] if r["gear_id"] == amp)
+        assert amp_entry["knobs"] == [
+            {"name": "Gain", "value": "7"},
+            {"name": "Volume", "value": "5"},
+            {"name": "Bright", "value": "On"}]
+        preset = c.get(f"/api/presets/{pid}").json()
+        assert preset["rig"][0]["knobs"] == [
+            {"name": "Gain", "value": "8"},
+            {"name": "Volume", "value": "4"},
+            {"name": "Bright", "value": "Off"}]
+        # no value anywhere was lost or changed
+        before_values = {(k["name"], k["value"]) for r in song["rig"] for k in r["knobs"]}
+        assert before_values == {("Gain", "7"), ("Volume", "5"), ("Bright", "On"),
+                                 ("Tone", "noon"), ("Level", "2:00")}
+        # idempotent: running again changes nothing
+        with main.db() as conn:
+            main.migrate_knobs_to_controls(conn)
+        assert [ct["name"] for ct in c.get(f"/api/gear/{amp}").json()["controls"]] == ["Gain", "Volume", "Bright"]
+
+
+def test_knob_migration_merges_with_existing_controls(tmp_path):
+    fresh(tmp_path)
+    with TestClient(main.app) as c:
+        setup_admin(c)
+        by_name = seed_ids(c)
+        amp = by_name["Club 20"]["id"]
+        # item already lists one control; the union adds what songs use around it
+        r = c.patch(f"/api/gear/{amp}", json={"specs": {"controls": [
+            {"name": "Gain", "kind": "knob", "value": "5"}]}})
+        assert r.status_code == 200
+        r = c.post("/api/songs", json={"title": "Merge Song", "rig": [
+            {"gear_id": amp, "knobs": [
+                {"name": "gain", "value": "7"},
+                {"name": "Master", "value": "6"}]},
+        ]})
+        assert r.status_code == 201, r.text
+        sid = r.json()["id"]
+        with main.db() as conn:
+            conn.execute("DELETE FROM settings WHERE key='migration-knob-controls'")
+            main.migrate_knobs_to_controls(conn)
+        controls = c.get(f"/api/gear/{amp}").json()["controls"]
+        # existing control keeps its place, casing, kind and default; new names append after
+        assert controls == [
+            {"name": "Gain", "kind": "knob", "value": "5"},
+            {"name": "Master", "kind": "knob"}]
+        # the song's lower-case "gain" took the control's canonical casing, value kept
+        rig = c.get(f"/api/songs/{sid}").json()["rig"]
+        assert rig[0]["knobs"] == [{"name": "Gain", "value": "7"}, {"name": "Master", "value": "6"}]

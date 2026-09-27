@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.14.0"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -560,6 +560,67 @@ def migrate(c) -> None:
         c.execute("ALTER TABLE restrings ADD COLUMN strings_id INTEGER REFERENCES gear(id) ON DELETE SET NULL")
     c.execute("CREATE INDEX IF NOT EXISTS idx_gear_strings ON gear(strings_id)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_restrings_strings ON restrings(strings_id)")
+    migrate_knobs_to_controls(c)
+
+
+def migrate_knobs_to_controls(c) -> None:
+    """0.14.0: knob names and panel order live on the gear item; songs keep only the values.
+
+    Older installs typed knob names per song and preset, so each item's Controls list is
+    rebuilt from the union of names used across every song and preset (most common order,
+    switches inferred from known names), and each stored knob list is re-sorted into that
+    panel order with values kept. Every typed name survives: anything an item didn't list is
+    added to it first. Runs once; the database is backed up first when anything changes.
+    """
+    if c.execute("SELECT value FROM settings WHERE key='migration-knob-controls'").fetchone():
+        return
+    usage: dict[int, dict[str, dict[str, Any]]] = {}
+    for table in ("song_gear_settings", "preset_gear_settings"):
+        for row in c.execute(f"SELECT gear_id, knobs FROM {table} WHERE gear_id IS NOT NULL").fetchall():
+            named = [k for k in json.loads(row["knobs"] or "[]") if str(k.get("name", "")).strip()]
+            for j, knob in enumerate(named):
+                name = str(knob["name"]).strip()
+                slot = usage.setdefault(row["gear_id"], {}).setdefault(
+                    name.lower(), {"name": name, "seen": 0, "positions": 0})
+                slot["seen"] += 1
+                slot["positions"] += j
+    plans: dict[int, list[dict[str, str]]] = {}
+    for gear_id, names in usage.items():
+        row = c.execute("SELECT specs FROM gear WHERE id=?", (gear_id,)).fetchone()
+        if not row:
+            continue
+        specs = json.loads(row["specs"] or "{}")
+        controls = specs.get("controls") or []
+        have = {str(ctl.get("name", "")).lower() for ctl in controls}
+        missing = [slot for key, slot in names.items() if key not in have]
+        if not missing:
+            continue
+        missing.sort(key=lambda slot: slot["positions"] / slot["seen"])
+        for slot in missing:
+            kind = "switch" if slot["name"].lower() in SWITCH_CONTROL_NAMES else "knob"
+            controls.append({"name": slot["name"], "kind": kind})
+        plans[gear_id] = controls
+    rewrites: list[tuple[str, int, str]] = []
+    for table in ("song_gear_settings", "preset_gear_settings"):
+        for row in c.execute(f"SELECT id, gear_id, knobs FROM {table}").fetchall():
+            knobs = [k for k in json.loads(row["knobs"] or "[]") if str(k.get("name", "")).strip()]
+            if not knobs:
+                continue
+            controls = plans.get(row["gear_id"]) or gear_controls(c, row["gear_id"])
+            new_knobs = ordered_knobs(controls, knobs)
+            if new_knobs != knobs:
+                rewrites.append((table, row["id"], json.dumps(new_knobs)))
+    if plans or rewrites:
+        c.commit()  # backup deadlocks if the same connection still holds the write lock
+        backup_database(c, "before-0.14.0")
+        for gear_id, controls in plans.items():
+            specs = json.loads(c.execute("SELECT specs FROM gear WHERE id=?", (gear_id,)).fetchone()[0] or "{}")
+            specs["controls"] = controls
+            c.execute("UPDATE gear SET specs=? WHERE id=?", (json.dumps(specs), gear_id))
+        for table, row_id, knobs in rewrites:
+            c.execute(f"UPDATE {table} SET knobs=? WHERE id=?", (knobs, row_id))
+    c.execute("INSERT OR REPLACE INTO settings(key, value) VALUES('migration-knob-controls', '1')")
+
 
 
 GEAR_TYPE_CHECK = re.compile(r"CHECK\s*\(\s*type\s+IN\s*\([^)]*\)\s*\)", re.IGNORECASE)
@@ -1031,6 +1092,50 @@ def clean_controls(value: Any) -> list[dict[str, str]]:
             entry["value"] = value
         out.append(entry)
     return out
+
+
+# Toggle-style controls inferred by the 0.14.0 knob migration: selectors and on/off switches
+# rather than rotary knobs. The same list drives the "save as controls" shortcut in the app.
+SWITCH_CONTROL_NAMES = {"pickup", "mode", "voice", "structure", "mod", "bright", "toneprint"}
+
+
+def gear_controls(c, gear_id: int | None) -> list[dict[str, str]]:
+    """The linked item's named controls in panel order, or [] when it has none."""
+    if gear_id is None:
+        return []
+    row = c.execute("SELECT specs FROM gear WHERE id=?", (gear_id,)).fetchone()
+    if not row:
+        return []
+    return json.loads(row["specs"] or "{}").get("controls") or []
+
+
+def ordered_knobs(controls: list[dict[str, str]], knobs: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Match knobs to the item's controls by name and return them in panel order.
+
+    Matched knobs take the control's canonical casing. Names the item does not list keep
+    their text and order at the end, so nothing anyone typed is ever dropped.
+    """
+    if not controls:
+        return knobs
+    by_lower = {str(ctl.get("name", "")).lower(): ctl for ctl in controls}
+    picked: dict[str, dict[str, str]] = {}
+    extra: list[dict[str, str]] = []
+    for knob in knobs:
+        key = str(knob.get("name", "")).lower()
+        ctl = by_lower.get(key)
+        if ctl is None:
+            extra.append(knob)
+        elif key not in picked:
+            picked[key] = {"name": ctl["name"], "value": str(knob.get("value", ""))}
+    ordered = [picked[str(ctl.get("name", "")).lower()] for ctl in controls
+               if str(ctl.get("name", "")).lower() in picked]
+    return ordered + extra
+
+
+def knobs_json_ordered(c, gear_id: int | None, knobs: list["Knob"] | None) -> str:
+    """knobs_json plus panel-order normalization against the linked item's controls."""
+    clean = [{"name": k.name.strip(), "value": k.value.strip()} for k in (knobs or []) if k.name.strip()]
+    return json.dumps(ordered_knobs(gear_controls(c, gear_id), clean))
 
 
 def clean_specs(type_: str, specs: dict[str, Any] | None) -> dict[str, Any]:
@@ -2577,6 +2682,7 @@ def rig_dict(row, c=None, o: Owner = SONG) -> dict[str, Any]:
         "position": row["position"],
         "engaged": row["engaged"],
         "knobs": json.loads(row["knobs"] or "[]"),
+        "controls": gear_controls(c, row["gear_id"]) if c else [],
         "note": row["note"],
         "photos": owner_photo_list(c, "preset_rig" if o == PRESET else "rig", row["id"]) if c else [],
     }
@@ -2763,7 +2869,7 @@ def insert_rig_setting(c, owner_id: int, item: RigSettingIn, position: int, o: O
         f"""INSERT INTO {o.rig}({o.col},gear_id,gear_name,position,engaged,knobs,note)
         VALUES(?,?,?,?,?,?,?)""",
         (owner_id, gear_id, name, item.position if item.position is not None else position,
-         item.engaged, knobs_json(item.knobs), item.note.strip()),
+         item.engaged, knobs_json_ordered(c, gear_id, item.knobs), item.note.strip()),
     ).lastrowid
 
 
@@ -2944,7 +3050,8 @@ def edit_rig_setting(c, song_id: int, setting_id: int, body: RigSettingPatch) ->
     if data.get("engaged") is not None:
         cols["engaged"] = data["engaged"]
     if data.get("knobs") is not None:
-        cols["knobs"] = knobs_json(body.knobs)
+        gid = cols["gear_id"] if "gear_id" in cols else row["gear_id"]
+        cols["knobs"] = knobs_json_ordered(c, gid, body.knobs)
     if data.get("note") is not None:
         cols["note"] = data["note"].strip()
     if cols:
@@ -3348,7 +3455,8 @@ def register_preset_routes(prefix: str, auth, v1: bool) -> None:
             if data.get("engaged") is not None:
                 cols["engaged"] = data["engaged"]
             if data.get("knobs") is not None:
-                cols["knobs"] = knobs_json(body.knobs)
+                gid = cols["gear_id"] if "gear_id" in cols else row["gear_id"]
+                cols["knobs"] = knobs_json_ordered(c, gid, body.knobs)
             if data.get("note") is not None:
                 cols["note"] = data["note"].strip()
             if cols:

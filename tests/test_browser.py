@@ -333,9 +333,10 @@ def test_song_editor_prefills_knobs_and_recall_sheet(app_url, width, height):
         page.locator("#sg-guitar").select_option(label="Starling")
         expect(page.locator(".rig-row")).to_have_count(1)
         page.locator("#rig-pick").select_option(label="Demo Drive")
-        names = page.locator("[data-r-kname^='1:']")
-        expect(names).to_have_count(3)
-        assert [names.nth(i).input_value() for i in range(3)] == ["Gain", "Tone", "Level"]
+        fixed = page.locator(".rig-row").nth(1).locator(".knob-fixed-name")
+        expect(fixed).to_have_count(3)
+        assert [fixed.nth(i).inner_text() for i in range(3)] == ["Gain", "Tone", "Level"]
+        expect(page.locator("[data-r-kname^='1:']")).to_have_count(0)
         page.locator("[data-r-kval='1:0']").fill("2:00")
         page.locator("[data-r-kval='1:1']").fill("noon")
         page.locator("[data-r-kval='1:2']").fill("max")
@@ -1523,4 +1524,88 @@ def test_knob_reorder_from_preset_view(app_url, width, height):
             card.get_by_role("button", name="Move Gain later").click()
         assert [x["name"] for x in req.get(app_url + f"/api/presets/{preset['id']}").json()["rig"][0]["knobs"]] == ["Treble", "Level", "Gain"]
         assert_no_overflow(page, "preset view knob reorder")
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1280, 900), (390, 844), (280, 653)])
+def test_controlled_item_drives_rig_knobs(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        gear = {g["name"]: g for g in req.get(app_url + "/api/gear").json()}
+        drive = gear["Demo Drive"]["id"]
+        assert req.patch(app_url + f"/api/gear/{drive}", data={"specs": {"controls": [
+            {"name": "Gain", "kind": "knob"}, {"name": "Tone", "kind": "knob"},
+            {"name": "Level", "kind": "knob"}]}}).status == 200
+        song = req.post(app_url + "/api/songs", data={
+            "title": "Controlled knobs", "rig": [{"gear_id": drive, "knobs": [
+                {"name": "Level", "value": "7"}, {"name": "Gain", "value": "2:00"},
+                {"name": "Tone", "value": "noon"}]}]}).json()
+
+        # song view: panel order from the item, no reorder arrows
+        page.goto(app_url + f"/#/songs/{song['id']}")
+        card = page.locator(".chain-item").first
+        knobs = card.locator(".knob")
+        expect(knobs).to_have_count(3)
+        assert [knobs.nth(i).inner_text().replace("\n", "").upper() for i in range(3)] == ["GAIN2:00", "TONENOON", "LEVEL7"]
+        expect(card.locator("[data-kord-up]")).to_have_count(0)
+        expect(card.locator("[data-kord-down]")).to_have_count(0)
+        assert_no_overflow(page, "controlled rig display")
+        if width in (280, 390):
+            page.screenshot(path=f"tests/screenshots/controlled-rig-{width}.png", full_page=True)
+
+        # editor: fixed names in panel order, values editable, no add/reorder
+        page.get_by_role("link", name="Edit", exact=True).click()
+        row = page.locator(".rig-row").first
+        fixed = row.locator(".knob-fixed-name")
+        expect(fixed).to_have_count(3)
+        assert [fixed.nth(i).inner_text() for i in range(3)] == ["Gain", "Tone", "Level"]
+        assert row.locator("[data-r-kval='0:0']").input_value() == "2:00"
+        expect(row.get_by_role("button", name="Add a knob")).to_have_count(0)
+        expect(row.locator("[data-r-kup]")).to_have_count(0)
+        expect(row.get_by_text("Knobs and order come from")).to_be_visible()
+        assert_no_overflow(page, "controlled rig editor")
+        if width in (280, 390):
+            page.screenshot(path=f"tests/screenshots/controlled-editor-{width}.png", full_page=True)
+        browser.close()
+
+
+@pytest.mark.parametrize("width,height", [(1280, 900), (280, 653)])
+def test_freeform_knobs_promote_to_item_controls(app_url, width, height):
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        page = browser.new_page(viewport={"width": width, "height": height})
+        sign_in(page, app_url)
+        req = page.request
+        gear = {g["name"]: g for g in req.get(app_url + "/api/gear").json()}
+        delay = gear["Demo Delay"]["id"]
+        song = req.post(app_url + "/api/songs", data={
+            "title": "Promote me", "rig": [{"gear_id": delay, "knobs": [
+                {"name": "Time", "value": "300ms"}, {"name": "Repeats", "value": "4"},
+                {"name": "Mix", "value": "noon"}]}]}).json()
+
+        # free-form: reorder arrows show on the song page
+        page.goto(app_url + f"/#/songs/{song['id']}")
+        expect(page.locator(".chain-item").first.locator("[data-kord-up]")).to_have_count(3)
+
+        # editor: promote the typed knobs to the item's controls
+        page.get_by_role("link", name="Edit", exact=True).click()
+        row = page.locator(".rig-row").first
+        with page.expect_response(lambda r: r.request.method == "PATCH" and f"/api/gear/{delay}" in r.url):
+            row.get_by_role("button", name="Save as Demo Delay's controls").click()
+        expect(row.locator(".knob-fixed-name")).to_have_count(3)
+        controls = req.get(app_url + f"/api/gear/{delay}").json()["controls"]
+        assert [c["name"] for c in controls] == ["Time", "Repeats", "Mix"]
+
+        # song page now follows the item: no arrows
+        page.goto(app_url + f"/#/songs/{song['id']}")
+        expect(page.locator(".chain-item").first.locator("[data-kord-up]")).to_have_count(0)
+        knobs = page.locator(".chain-item").first.locator(".knob")
+        expect(knobs).to_have_count(3)
+        assert [knobs.nth(i).inner_text().replace("\n", "").upper() for i in range(3)] == ["TIME300MS", "REPEATS4", "MIXNOON"]
+        assert_no_overflow(page, "promoted rig display")
+        if width == 280:
+            page.screenshot(path="tests/screenshots/promoted-rig-280.png", full_page=True)
         browser.close()

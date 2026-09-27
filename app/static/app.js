@@ -915,6 +915,8 @@ async function loadGearSongs(g) {
 /* ---------------------------------------------------------------- controls */
 
 const CONTROL_TYPES = ["guitar", "amp", "pedal"];
+// Same inference the server migration uses: selectors and on/off toggles are switches.
+const SWITCH_NAMES = new Set(["pickup", "mode", "voice", "structure", "mod", "bright", "toneprint"]);
 const CONTROL_HINT = {
   guitar: "e.g. Volume, Tone, Pickup selector",
   amp: "e.g. Gain, Bass, Mid, Treble, Master",
@@ -938,7 +940,8 @@ function controlsForm(g) {
                 <option value="knob" ${r.kind !== "switch" ? "selected" : ""}>Knob</option>
                 <option value="switch" ${r.kind === "switch" ? "selected" : ""}>Switch</option>
               </select>
-              <button class="small ghost" type="button" data-ct-up="${i}" aria-label="Move up" ${i === 0 ? "disabled" : ""}>↑</button>
+              <button class="small ghost" type="button" data-ct-up="${i}" aria-label="Move ${esc(r.name || "control")} earlier" ${i === 0 ? "disabled" : ""}>↑</button>
+              <button class="small ghost" type="button" data-ct-down="${i}" aria-label="Move ${esc(r.name || "control")} later" ${i === rows.length - 1 ? "disabled" : ""}>↓</button>
               <button class="small ghost danger" type="button" data-ct-del="${i}" aria-label="Remove control ${i + 1}">✕</button>
             </div>`).join("")}
         </div>
@@ -956,6 +959,11 @@ function controlsForm(g) {
     sheetEl.querySelectorAll("[data-ct-up]").forEach((el) => el.addEventListener("click", () => {
       const i = Number(el.dataset.ctUp);
       [rows[i - 1], rows[i]] = [rows[i], rows[i - 1]];
+      render();
+    }));
+    sheetEl.querySelectorAll("[data-ct-down]").forEach((el) => el.addEventListener("click", () => {
+      const i = Number(el.dataset.ctDown);
+      [rows[i + 1], rows[i]] = [rows[i], rows[i + 1]];
       render();
     }));
     document.getElementById("ct-add").addEventListener("click", () => {
@@ -1379,7 +1387,7 @@ function chainHtml(rig, owner = null) {
             <strong class="wrap-any">${gearLink(r.gear_id, r.gear_name)}</strong>
             <span class="engaged eng-${esc(r.engaged)}">${ENGAGED_LABEL[r.engaged] || esc(r.engaged)}</span>
           </div>
-          ${r.knobs.length ? `<div class="knobs">${knobText(r.knobs, owner ? r.id : null)}</div>` : ""}
+          ${r.knobs.length ? `<div class="knobs">${knobText(r.knobs, owner && !(r.controls && r.controls.length) ? r.id : null)}</div>` : ""}
           ${r.note ? `<p class="notes muted">${esc(r.note)}</p>` : ""}
           ${owner && featureOn("feature_setting_photos") ? `
             <div class="setting-photos">
@@ -1961,6 +1969,25 @@ function knobsFromControls(g) {
   return controls.map((c) => ({ name: c.name, value: c.value || "", kind: c.kind }));
 }
 
+/* An entry on an item with controls lists every control in panel order: the saved value,
+   the item default, or blank. Typed names the item doesn't list yet stay at the end so
+   nothing vanishes mid-edit. */
+function knobsForEntry(g, existing) {
+  const controls = (g && g.controls) || [];
+  if (!controls.length) return existing.map((k) => ({ ...k }));
+  const values = {};
+  existing.forEach((k) => {
+    const key = String(k.name || "").toLowerCase();
+    if (key && values[key] === undefined) values[key] = k.value;
+  });
+  const rows = controls.map((c) => ({ name: c.name, value: values[c.name.toLowerCase()] ?? (c.value || ""), kind: c.kind }));
+  const known = new Set(controls.map((c) => c.name.toLowerCase()));
+  existing.forEach((k) => {
+    if (k.name && !known.has(k.name.toLowerCase())) rows.push({ ...k, kind: k.kind || "knob" });
+  });
+  return rows;
+}
+
 /* One editor for songs and presets: both are a signal chain plus patches. */
 async function songEditorView(id, kind = "song") {
   const isPreset = kind === "preset";
@@ -1986,7 +2013,7 @@ async function songEditorView(id, kind = "song") {
     presets: (song.presets || []).map((l) => ({ preset_id: l.preset_id, label: l.label, note: l.note, name: l.preset.name })),
     rig: song.rig.map((r) => ({
       gear_id: r.gear_id, gear_name: r.gear_name, engaged: r.engaged, note: r.note,
-      knobs: r.knobs.map((k) => ({ ...k, kind: kindOf(r.gear_id, k.name) })),
+      knobs: knobsForEntry(byId.get(r.gear_id), r.knobs.map((k) => ({ ...k, kind: kindOf(r.gear_id, k.name) }))),
     })),
     patches: song.patches.map((p) => ({
       gear_id: p.gear_id, gear_name: p.gear_name, patch_ref: p.patch_ref, patch_name: p.patch_name,
@@ -2012,6 +2039,14 @@ async function songEditorView(id, kind = "song") {
     if (draft.rig.some((r) => r.gear_id === g.id)) return;
     const row = { gear_id: g.id, gear_name: g.name, engaged: "on", note: "", knobs: knobsFromControls(g) };
     if (atStart) draft.rig.unshift(row); else draft.rig.push(row);
+  }
+
+  function fixedKnobRows(list, i) {
+    return list.map((k, j) => `
+      <div class="knob-row">
+        <span class="knob-fixed-name">${esc(k.name)}${k.kind === "switch" ? ` <span class="muted">switch</span>` : ""}</span>
+        <input data-r-kval="${i}:${j}" maxlength="40" value="${esc(k.value)}" placeholder="${k.kind === "switch" ? "e.g. Bright" : "e.g. 2:00, noon, 7"}" aria-label="${esc(k.name)} setting" />
+      </div>`).join("");
   }
 
   function knobRows(list, prefix, idx) {
@@ -2097,7 +2132,7 @@ async function songEditorView(id, kind = "song") {
         ${isPreset ? "" : presetPicker()}
 
         <h2>${isPreset || !draft.presets.length ? "Signal chain" : "Song's own settings"}</h2>
-        <p class="hint" style="margin-top:-6px">Each piece of gear in signal order, with settings for this ${isPreset ? "tone" : "song"}. Use the arrows beside each control to match the knob order on your gear.</p>
+        <p class="hint" style="margin-top:-6px">Each piece of gear in signal order, with settings for this ${isPreset ? "tone" : "song"}. Knob names and order come from each item's controls; you only set the values here.</p>
         <div class="stack" id="rig-rows">
           ${draft.rig.map((r, i) => `
             <div class="card rig-row">
@@ -2112,9 +2147,12 @@ async function songEditorView(id, kind = "song") {
               <div class="seg small-seg" role="radiogroup" aria-label="${esc(r.gear_name)} on or off">
                 ${["on", "off", "toggle"].map((e) => `<button type="button" role="radio" aria-checked="${r.engaged === e}" class="${r.engaged === e ? "on" : ""}" data-rig-eng="${i}:${e}">${ENGAGED_LABEL[e]}</button>`).join("")}
               </div>
-              <div class="knob-list">${knobRows(r.knobs, "r", i)}</div>
+              <div class="knob-list">${(byId.get(r.gear_id)?.controls || []).length ? fixedKnobRows(r.knobs, i) : knobRows(r.knobs, "r", i)}</div>
               <div class="row">
-                <button class="small ghost" type="button" data-rig-kadd="${i}">Add a knob</button>
+                ${(byId.get(r.gear_id)?.controls || []).length
+                  ? `<span class="hint" style="margin:0">Knobs and order come from <a href="#/gear/${r.gear_id}">${esc(r.gear_name)}</a>'s controls.</span>`
+                  : `<button class="small ghost" type="button" data-rig-kadd="${i}">Add a knob</button>
+                     ${r.gear_id && r.knobs.some((k) => k.name.trim()) ? `<button class="small ghost" type="button" data-rig-ksave="${i}">Save as ${esc(r.gear_name)}'s controls</button>` : ""}`}
               </div>
               <input data-rig-note="${i}" maxlength="1000" value="${esc(r.note)}" placeholder="Note (optional), e.g. kick on for the solo" aria-label="${esc(r.gear_name)} note" />
             </div>`).join("") || `<p class="muted">Nothing in the chain yet.</p>`}
@@ -2262,6 +2300,24 @@ async function songEditorView(id, kind = "song") {
       render();
       const names = view.querySelectorAll(`[data-r-kname^="${i}:"]`);
       names[names.length - 1].focus();
+    }));
+    $("[data-rig-ksave]").forEach((b) => b.addEventListener("click", async () => {
+      const i = Number(b.dataset.rigKsave);
+      const r = draft.rig[i];
+      const g = byId.get(r.gear_id);
+      if (!g) return;
+      const controls = r.knobs.filter((k) => k.name.trim()).map((k) => ({
+        name: k.name.trim(),
+        kind: k.kind === "switch" || SWITCH_NAMES.has(k.name.trim().toLowerCase()) ? "switch" : "knob",
+      }));
+      try {
+        await api(`/api/gear/${g.id}`, { method: "PATCH", body: { specs: { controls } } });
+        g.controls = controls;
+        toast(`Controls saved to ${g.name}`);
+        render();
+      } catch (ex) {
+        document.getElementById("sg-error").textContent = ex.message;
+      }
     }));
     const rigPick = document.getElementById("rig-pick");
     rigPick.addEventListener("change", () => {

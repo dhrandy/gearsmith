@@ -200,6 +200,7 @@ function route() {
   if (!state.me) { authView(); return; }
   state.listFilter = null;
   topbar.hidden = false;
+  document.querySelector('[href="#/settings"]').hidden = !!state.me.token_session;
   document.getElementById("user-badge").textContent = state.me.username + (state.me.is_admin ? " (admin)" : "");
   document.getElementById("tab-sets").hidden = !featureOn("feature_sets");
   document.getElementById("tab-songs").hidden = !featureOn("feature_songs");
@@ -2812,6 +2813,10 @@ async function dueView() {
 /* ---------------------------------------------------------------- settings */
 
 async function settingsView() {
+  if (state.me?.token_session) {
+    view.innerHTML = `<p class="muted">Settings need a username-and-password sign-in.</p>`;
+    return;
+  }
   const [settings, notify, tokens, users] = await Promise.all([
     api("/api/settings"),
     state.me.is_admin ? api("/api/notifications") : Promise.resolve(null),
@@ -3453,7 +3458,7 @@ async function boot(skipStatus = false) {
   document.getElementById("app-name").textContent = state.appName;
   try {
     state.me = await api("/api/me");
-    state.settings = await api("/api/settings");
+    state.settings = state.me.token_session ? null : await api("/api/settings");
   } catch {
     state.me = null;
   }

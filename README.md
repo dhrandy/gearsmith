@@ -148,7 +148,7 @@ Settings > Notifications takes any [Apprise](https://github.com/caronc/apprise) 
 
 Settings > API tokens creates a token that acts as you over the REST API. Interactive docs (with a "try it" button) are at `/api/docs`; the OpenAPI spec is at `/api/v1/openapi.json`. Both require a signed-in session or a valid API bearer token.
 
-The sign-in page does not advertise tokens. To use an existing token on the website, leave **Username** empty and put the token in the masked **Password** field. It signs in as the token's owner with the same 30-day session as a password sign-in. Revoked tokens and deactivated users cannot start new sessions; sessions already signed in stay active until logout or expiry. Turn off **Sign in with an API token** in Settings > Features to disable token sign-in while keeping the API available. Keep tokens secret, use HTTPS, and do not put them in URLs.
+The sign-in page does not advertise tokens. To use an existing token on the website, leave **Username** empty and put the token in the masked **Password** field. It signs in as the token's owner with a 30-day session, but Settings, account/token management, notifications and backups require username/password sign-in. Revoked tokens and deactivated users cannot start new sessions; sessions already signed in stay active until logout or expiry. Turn off **Sign in with an API token** in Settings > Features to disable token sign-in while keeping the API available. Keep tokens secret, use HTTPS, and do not put them in URLs.
 
 To connect an AI assistant, use this prompt with your own URL. Provide the token separately through a secure credential store, never in a prompt:
 
@@ -228,3 +228,5 @@ Tests cover the API and the UI (Playwright) and run in CI before every image pub
 
 MIT - see [LICENSE](LICENSE).
 
+
+Token website sessions cannot open Settings, manage accounts or tokens, read notification credentials, or import/export backups. Those actions require username/password sign-in. This update signs existing sessions out once because older sessions did not record how they signed in. Stored app data and API tokens stay unchanged.

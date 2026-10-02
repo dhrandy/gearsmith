@@ -1371,7 +1371,18 @@ def test_token_sign_in_on_desktop_and_mobile(app_url, width, height):
         expect(page.locator('#user-badge')).to_contain_text('admin-test')
         assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth')
         assert token not in page.content()
+        expect(page.locator('[href="#/settings"]')).to_be_hidden()
         page.goto(app_url + '/#/settings')
+        expect(page.get_by_text('Settings need a username-and-password sign-in.')).to_be_visible()
+        expect(page.locator('[data-feature=feature_token_login]')).to_have_count(0)
+        assert page.request.get(app_url + '/api/settings').status == 403
+        page.screenshot(path=f'/tmp/gearsmith-token-settings-{width}.png', full_page=True)
+        page.locator('#logout').click()
+        sign_in(page, app_url)
+        page.goto(app_url + '/#/settings')
+        expect(page.locator('[href="#/settings"]')).to_be_visible()
+        expect(page.locator('[data-feature=feature_token_login]')).to_be_visible()
+        assert page.request.get(app_url + '/api/settings').status == 200
         page.locator('[data-feature=feature_token_login]').uncheck()
         page.locator('#logout').click()
         page.reload()

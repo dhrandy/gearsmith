@@ -146,7 +146,7 @@ Settings > Notifications takes any [Apprise](https://github.com/caronc/apprise) 
 
 ## API tokens and AI assistants
 
-Settings > API tokens creates a token that acts as you over the REST API. Interactive docs (with a "try it" button) are at `/api/docs`; the OpenAPI spec is at `/api/v1/openapi.json`.
+Settings > API tokens creates a token that acts as you over the REST API. Interactive docs (with a "try it" button) are at `/api/docs`; the OpenAPI spec is at `/api/v1/openapi.json`. Both require a signed-in session or a valid API bearer token.
 
 The sign-in page does not advertise tokens. To use an existing token on the website, leave **Username** empty and put the token in the masked **Password** field. It signs in as the token's owner with the same 30-day session as a password sign-in. Revoked tokens and deactivated users cannot start new sessions; sessions already signed in stay active until logout or expiry. Turn off **Sign in with an API token** in Settings > Features to disable token sign-in while keeping the API available. Keep tokens secret, use HTTPS, and do not put them in URLs.
 

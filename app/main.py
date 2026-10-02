@@ -54,7 +54,7 @@ API_WINDOW_SECONDS = 60
 API_FAIL_LIMIT = 5
 API_FAIL_WINDOW_SECONDS = 15 * 60
 
-APP_VERSION = "0.15.0"
+APP_VERSION = "0.15.1"
 
 GEAR_TYPES = ("guitar", "amp", "pedal", "pick", "strings")
 GEAR_TYPE_LABELS = {"guitar": "Guitars", "amp": "Amps", "pedal": "Pedals", "pick": "Picks", "strings": "Strings"}
@@ -4217,13 +4217,23 @@ def v1_openapi() -> dict[str, Any]:
     )
 
 
+def require_docs_access(request: Request) -> None:
+    """API docs and schema need a signed-in session or a valid API token."""
+    if request.headers.get("authorization", "").lower().startswith("bearer "):
+        token_auth(request)
+        return
+    current_user(request)
+
+
 @app.get("/api/v1/openapi.json", include_in_schema=False)
-def v1_openapi_json():
+def v1_openapi_json(request: Request):
+    require_docs_access(request)
     return JSONResponse(v1_openapi())
 
 
 @app.get("/api/docs", include_in_schema=False)
-def v1_docs():
+def v1_docs(request: Request):
+    require_docs_access(request)
     return get_swagger_ui_html(
         openapi_url="/api/v1/openapi.json",
         title="Gearsmith API",

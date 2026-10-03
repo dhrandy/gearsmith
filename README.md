@@ -1,3 +1,5 @@
+![Gearsmith app banner](docs/banner.png)
+
 # Gearsmith
 
 **Beta** - a simple self-hosted gear tracker for guitarists. Keep your guitars, amps, pedals, picks, and strings in one place, track how old each guitar's strings are, group gear into sets (boards and rigs), and save the exact settings each song needs. One Docker container, SQLite storage, no subscriptions, no cloud account - your data stays on your box.
